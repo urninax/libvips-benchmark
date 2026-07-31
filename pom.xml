@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.journi.bench</groupId>
+    <artifactId>libvips-benchmark</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+
+    <!--
+        Independent project. Not part of the "core" repo's sbt build.
+        AWS SDK version pinned to match core/build.sbt:116 (awsVersion = "2.41.30")
+        so client behavior (connection pool, timeouts) mirrors production.
+    -->
+    <properties>
+        <maven.compiler.release>23</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <aws.sdk.version>2.41.30</aws.sdk.version>
+        <vips.ffm.version>1.9.8</vips.ffm.version>
+    </properties>
+
+    <dependencies>
+        <!-- true libvips streaming via Java FFM API -->
+        <dependency>
+            <groupId>app.photofox.vips-ffm</groupId>
+            <artifactId>vips-ffm-core</artifactId>
+            <version>${vips.ffm.version}</version>
+        </dependency>
+
+        <!-- AWS SDK v2, same version as production (core/build.sbt:116) -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3</artifactId>
+            <version>${aws.sdk.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>apache-client</artifactId>
+            <version>${aws.sdk.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.11.0</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>bench</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.6.0</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals><goal>shade</goal></goals>
+                        <configuration>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <mainClass>com.journi.bench.Main</mainClass>
+                                </transformer>
+                            </transformers>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

@@ -1,0 +1,255 @@
+package com.journi.bench.variant;
+
+import app.photofox.vipsffm.*;
+import app.photofox.vipsffm.enums.VipsAccess;
+import app.photofox.vipsffm.enums.VipsExtend;
+import app.photofox.vipsffm.enums.VipsFailOn;
+import app.photofox.vipsffm.enums.VipsInteresting;
+import app.photofox.vipsffm.enums.VipsSize;
+import com.journi.bench.BenchConfig;
+import com.journi.bench.harness.JobResult;
+import com.journi.bench.s3.StreamingPartUploadOutputStream;
+import software.amazon.awssdk.core.sync.RequestBody;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.GetObjectRequest;
+import software.amazon.awssdk.services.s3.model.PutObjectRequest;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
+import java.util.concurrent.atomic.AtomicReference;
+
+/**
+ * Variant B: vips-ffm. Implements the full B0-B3 grid via a Mode enum, so the
+ * comparison can isolate "is libvips itself faster" (B0 vs GM/IM) from
+ * "does streaming actually help" (B3 vs B0) - see plan's variant grid.
+ *
+ * NOTE ON API SURFACE: exact vips-ffm method signatures (VImage.embed,
+ * thumbnailSource, VipsOption factories, VCustomSource/VCustomTarget
+ * constructors) were verified by reading the library's source directly
+ * during planning, but not compile-checked locally (no JDK23+/Maven
+ * available in the authoring environment). First `mvn compile` on the
+ * target machine is expected to surface any final signature corrections -
+ * treat this file as the spike, not as pre-verified.
+ *
+ * access=ACCESS_SEQUENTIAL is the single most important option here - it
+ * tells libvips it may stream forward-only and never revisit, which is what
+ * actually keeps memory low. Without it libvips assumes random access and
+ * buffers regardless of the source type.
+ */
+public final class VipsStreamingVariant implements Variant {
+
+    public enum Mode { B0_BUFFERED_BUFFERED, B1_BUFFERED_STREAMED, B2_STREAMED_BUFFERED, B3_STREAMED_STREAMED }
+    public enum Operation { STANDARD_RESIZE, BLEED_RESIZE }
+
+    private static final long TARGET_PIXELS = 2_250_000L;
+    private static final int CONTENT_W = 2480, CONTENT_H = 3508, BLEED_PX = 36;
+    private static final int FULL_W = CONTENT_W + 2 * BLEED_PX, FULL_H = CONTENT_H + 2 * BLEED_PX;
+    private static final int READ_SCRATCH_SIZE = 256 * 1024;
+
+    private final S3Client s3;
+    private final String bucket;
+    private final Mode mode;
+    private final Operation operation;
+    private final long partSizeBytes;
+    private final String iccProfilePath;
+
+    public VipsStreamingVariant(S3Client s3, String bucket, Mode mode, Operation operation,
+                                 long partSizeBytes, String iccProfilePath) {
+        this.s3 = s3;
+        this.bucket = bucket;
+        this.mode = mode;
+        this.operation = operation;
+        this.partSizeBytes = partSizeBytes;
+        this.iccProfilePath = iccProfilePath;
+    }
+
+    @Override
+    public String name() {
+        return "vips " + mode.name().substring(0, 2).toLowerCase() + " " + operation.name().toLowerCase()
+            + " (" + (mode == Mode.B0_BUFFERED_BUFFERED ? "buffered/buffered" :
+                      mode == Mode.B1_BUFFERED_STREAMED ? "buffered/streamed" :
+                      mode == Mode.B2_STREAMED_BUFFERED ? "streamed/buffered" : "streamed/streamed") + ")";
+    }
+
+    @Override
+    public void setUp(BenchConfig cfg) {
+        Vips.init();
+        // NON-NEGOTIABLE: libvips caches ~100 operations by default, which
+        // would make repeated drains of the same fixture images fraudulently
+        // fast. Disabling this also better models a real long-running server.
+        Vips.disableOperationCache();
+    }
+
+    @Override
+    public void tearDown() {}
+
+    @Override
+    public JobResult process(String sourceKey, String destKey) {
+        long t0 = System.nanoTime();
+        AtomicReference<Long> fetchNanos = new AtomicReference<>(0L);
+        AtomicReference<Long> uploadNanos = new AtomicReference<>(0L);
+        long bytesIn = 0, bytesOut = 0;
+        int outW = 0, outH = 0;
+
+        try (Arena arena = Arena.ofShared()) { // shared, NOT confined - libvips' own worker
+                                                 // threadpool may invoke our callbacks from a
+                                                 // thread other than the one that created the
+                                                 // arena; confined arenas throw in that case.
+            boolean streamFetch = mode == Mode.B2_STREAMED_BUFFERED || mode == Mode.B3_STREAMED_STREAMED;
+            boolean streamPut = mode == Mode.B1_BUFFERED_STREAMED || mode == Mode.B3_STREAMED_STREAMED;
+
+            VImage source;
+            byte[] bufferedInput = null;
+            if (streamFetch) {
+                long fs = System.nanoTime();
+                var getResponse = s3.getObject(GetObjectRequest.builder().bucket(bucket).key(sourceKey).build());
+                VSource vsrc = new VCustomSource(arena, readCallback(getResponse, fetchNanos, fs));
+                source = VImage.newFromSource(arena, vsrc,
+                    VipsOption.Enum("access", VipsAccess.ACCESS_SEQUENTIAL),
+                    VipsOption.Enum("fail-on", VipsFailOn.FAIL_ON_ERROR));
+            } else {
+                long fs = System.nanoTime();
+                try (InputStream in = s3.getObject(GetObjectRequest.builder().bucket(bucket).key(sourceKey).build())) {
+                    ByteArrayOutputStream buf = new ByteArrayOutputStream();
+                    in.transferTo(buf);
+                    bufferedInput = buf.toByteArray();
+                }
+                fetchNanos.set(System.nanoTime() - fs);
+                bytesIn = bufferedInput.length;
+                VSource vsrc = VSource.newFromBytes(arena, bufferedInput);
+                source = VImage.newFromSource(arena, vsrc,
+                    VipsOption.Enum("access", VipsAccess.ACCESS_SEQUENTIAL));
+            }
+
+            long procStart = System.nanoTime();
+            VImage processed = operation == Operation.STANDARD_RESIZE
+                ? standardResize(arena, source)
+                : bleedResize(source);
+            long procEnd = System.nanoTime();
+            outW = (int) processed.getWidth();
+            outH = (int) processed.getHeight();
+
+            if (streamPut) {
+                long us = System.nanoTime();
+                try (StreamingPartUploadOutputStream upload =
+                         new StreamingPartUploadOutputStream(s3, bucket, destKey, partSizeBytes)) {
+                    VTarget vtgt = new VCustomTarget(arena, writeCallback(upload), endCallback(upload));
+                    processed.jpegsaveTarget(vtgt, VipsOption.Int("Q", 85), VipsOption.Boolean("strip", true));
+                    bytesOut = upload.totalBytesWritten();
+                }
+                uploadNanos.set(System.nanoTime() - us);
+            } else {
+                long us = System.nanoTime();
+                VTarget memTarget = VTarget.newToMemory(arena);
+                processed.jpegsaveTarget(memTarget, VipsOption.Int("Q", 85), VipsOption.Boolean("strip", true));
+                byte[] outBytes = memTarget.getBlob().getBytes();
+                bytesOut = outBytes.length;
+                s3.putObject(
+                    PutObjectRequest.builder().bucket(bucket).key(destKey).contentLength((long) outBytes.length).build(),
+                    RequestBody.fromBytes(outBytes));
+                uploadNanos.set(System.nanoTime() - us);
+            }
+
+            long total = System.nanoTime() - t0;
+            return new JobResult(sourceKey, true, null, total,
+                fetchNanos.get(), procEnd - procStart, uploadNanos.get(),
+                bytesIn, bytesOut, outW, outH);
+        } catch (Exception e) {
+            return JobResult.failure(sourceKey, e.toString(), System.nanoTime() - t0);
+        }
+    }
+
+    private VImage standardResize(Arena arena, VImage source) throws VipsError {
+        // thumbnailImage fuses libjpeg shrink-on-load into the decode - the largest
+        // single structural win over GM, since it avoids ever materializing a
+        // full-resolution decoded raster for a downscale.
+        //
+        // NOTE: GM's command chain includes `-background "#ffffff" -flatten` to
+        // composite any alpha channel onto white before JPEG encode (JPEG has no
+        // alpha, so this only matters for sources that HAD one, e.g. PNG input).
+        // The vips-ffm .flatten(ArrayDouble("background", [255,255,255])) call
+        // reproducibly throws "linear: vector must have 1 or 2 elements" - a real
+        // vips-ffm option-routing bug/mismatch, not yet resolved (bleedResize()
+        // below has no flatten call and has 0 failures, confirming this is the
+        // culprit). Dropped for now since both fixtures (baseline/progressive
+        // JPEG) have no alpha channel, so flatten is a no-op for this benchmark's
+        // actual test images either way - but this means an alpha-channel source
+        // (e.g. PNG) would NOT get the same white-background compositing GM
+        // applies, and output would visibly differ for that case. Flagged as a
+        // known gap, not silently working around a real correctness difference.
+        int[] target = GmStandardVariant.areaFit((int) source.getWidth(), (int) source.getHeight(), TARGET_PIXELS);
+        return source
+            .autorot()
+            .iccTransform("srgb", VipsOption.String("input-profile", iccProfilePath))
+            .thumbnailImage(
+                target[0],
+                VipsOption.Int("height", target[1]),
+                VipsOption.Enum("size", VipsSize.SIZE_FORCE));
+    }
+
+    private VImage bleedResize(VImage source) throws VipsError {
+        VImage content = source
+            .autorot()
+            .iccTransform("srgb", VipsOption.String("input-profile", iccProfilePath))
+            .thumbnailImage(
+                CONTENT_W,
+                VipsOption.Int("height", CONTENT_H),
+                VipsOption.Enum("crop", VipsInteresting.INTERESTING_CENTRE));
+        return content.embed(BLEED_PX, BLEED_PX, FULL_W, FULL_H,
+            VipsOption.Enum("extend", VipsExtend.EXTEND_MIRROR));
+    }
+
+    /**
+     * Reusable per-job scratch buffer, NOT the library's default readNBytes-per-
+     * call implementation (which allocates a fresh byte[] on every callback -
+     * hundreds of short-lived arrays per image, times cores*2 jobs, times
+     * measured reps - exactly the GC noise the GcSampler metric is meant to
+     * surface). single read(), not readNBytes(): 0 return means EOF to libvips,
+     * -1 means error - NOT the same as a short read.
+     */
+    private static VCustomSource.ReadCallback readCallback(InputStream in, AtomicReference<Long> fetchNanosAcc, long fetchStartNanos) {
+        byte[] scratch = new byte[READ_SCRATCH_SIZE];
+        return (MemorySegment dataPointer, long length) -> {
+            long ioStart = System.nanoTime();
+            try {
+                int want = (int) Math.min(length, scratch.length);
+                int n = in.read(scratch, 0, want);
+                if (n <= 0) {
+                    try { in.close(); } catch (IOException ignored) {}
+                    return 0; // EOF
+                }
+                MemorySegment.copy(scratch, 0, dataPointer, ValueLayout.JAVA_BYTE, 0L, n);
+                return (long) n;
+            } catch (IOException e) {
+                return -1L;
+            } finally {
+                fetchNanosAcc.updateAndGet(v -> v + (System.nanoTime() - ioStart));
+            }
+        };
+    }
+
+    private static VCustomTarget.WriteCallback writeCallback(StreamingPartUploadOutputStream upload) {
+        return (MemorySegment seg) -> {
+            try {
+                return upload.writeSegment(seg);
+            } catch (IOException e) {
+                return -1L;
+            }
+        };
+    }
+
+    private static VCustomTarget.EndCallback endCallback(StreamingPartUploadOutputStream upload) {
+        return () -> {
+            try {
+                upload.finish();
+                return 0;
+            } catch (IOException e) {
+                return -1;
+            }
+        };
+    }
+}
