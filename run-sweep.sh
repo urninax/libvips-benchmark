@@ -80,19 +80,44 @@ mkdir -p results
 docker compose up -d --wait minio toxiproxy
 docker compose run --rm -T seed
 
+failed_profiles=()
+
 for profile in none az region degraded; do
   echo "=== Running latency profile: $profile ==="
   LATENCY_PROFILE="$profile" INFRA_CPUSET="$INFRA_CPUSET" \
     docker compose up --force-recreate --no-deps toxics
 
-  # -T: disable pseudo-TTY allocation. Without it, repeated `docker compose
-  # run` calls inside this loop can have the first call's TTY/stdin handling
-  # interfere with later iterations - a known gotcha for `docker compose run`
-  # invoked in a loop from a script - causing the loop to silently stop after
-  # its first iteration instead of erroring.
+  # -T: no pseudo-TTY. These are non-interactive batch jobs, and a TTY only
+  # adds control characters to the tee'd log.
+  #
+  # `|| true` on the pipeline plus an explicit PIPESTATUS check: WITHOUT this,
+  # `set -euo pipefail` aborts the ENTIRE sweep the moment one profile's bench
+  # container exits non-zero, so a crash in the first profile silently costs
+  # you the other three - and prints no error saying why. Each profile is
+  # independent, so a failure is recorded and the sweep carries on.
   BENCH_CPUSET="$BENCH_CPUSET" INFRA_CPUSET="$INFRA_CPUSET" RUN_ID="$profile" \
-    docker compose run --rm --no-deps -T bench run 2>&1 | tee "results/summary-${profile}.txt"
+    docker compose run --rm --no-deps -T bench run 2>&1 | tee "results/summary-${profile}.txt" || true
+  bench_status="${PIPESTATUS[0]}"
+
+  if [[ "$bench_status" -ne 0 ]]; then
+    failed_profiles+=("${profile}(exit=${bench_status})")
+    echo
+    echo "!!! profile '${profile}' FAILED: bench container exited ${bench_status}" >&2
+    case "$bench_status" in
+      137) echo "    exit 137 = SIGKILL, almost always the 8g mem_limit OOM-killer." >&2
+           echo "    Check: docker inspect the run, or raise mem_limit in docker-compose.yml." >&2 ;;
+      139) echo "    exit 139 = SIGSEGV, a native crash inside libvips/vips-ffm." >&2 ;;
+      1)   echo "    exit 1 = the JVM threw; the stack trace should be in results/summary-${profile}.txt." >&2 ;;
+    esac
+    echo "    Continuing with the next profile." >&2
+    echo
+  fi
 done
 
 echo
+if [[ ${#failed_profiles[@]} -gt 0 ]]; then
+  echo "Sweep finished WITH FAILURES: ${failed_profiles[*]}"
+  echo "Summaries (including partial ones) in ./results/summary-<profile>.txt"
+  exit 1
+fi
 echo "All profiles complete. Summaries in ./results/summary-<profile>.txt"
