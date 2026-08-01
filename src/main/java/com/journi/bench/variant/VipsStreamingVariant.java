@@ -108,6 +108,19 @@ public final class VipsStreamingVariant implements Variant {
                 long fs = System.nanoTime();
                 var getResponse = s3.getObject(GetObjectRequest.builder().bucket(bucket).key(sourceKey).build());
                 VSource vsrc = new VCustomSource(arena, readCallback(getResponse, fetchNanos, fs));
+                // The read callback only closes the S3 response stream when it observes EOF
+                // (n <= 0). libvips isn't guaranteed to read a source down to true EOF (e.g. it
+                // may stop once it has enough data to decode/thumbnail), which would otherwise
+                // leak the underlying pooled HTTP connection on every such job - exhausting the
+                // shared S3Client's connection pool after enough reps. Registering this cleanup
+                // on the arena (same idiom as VSource#newFromInputStream) guarantees the stream
+                // closes exactly once when this job's arena scope ends, success or failure.
+                vsrc.getUnsafeStructAddress().reinterpret(arena, (_) -> {
+                    try {
+                        getResponse.close();
+                    } catch (IOException ignored) {
+                    }
+                });
                 source = VImage.newFromSource(arena, vsrc,
                     VipsOption.Enum("access", VipsAccess.ACCESS_SEQUENTIAL),
                     VipsOption.Enum("fail-on", VipsFailOn.FAIL_ON_ERROR));
