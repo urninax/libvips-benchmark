@@ -78,15 +78,20 @@ mkdir -p results
 # bandwidth never showed up in results regardless of which profile was
 # "applied" moments earlier.
 docker compose up -d --wait minio toxiproxy
-docker compose run --rm seed
+docker compose run --rm -T seed
 
 for profile in none az region degraded; do
   echo "=== Running latency profile: $profile ==="
   LATENCY_PROFILE="$profile" INFRA_CPUSET="$INFRA_CPUSET" \
     docker compose up --force-recreate --no-deps toxics
 
+  # -T: disable pseudo-TTY allocation. Without it, repeated `docker compose
+  # run` calls inside this loop can have the first call's TTY/stdin handling
+  # interfere with later iterations - a known gotcha for `docker compose run`
+  # invoked in a loop from a script - causing the loop to silently stop after
+  # its first iteration instead of erroring.
   BENCH_CPUSET="$BENCH_CPUSET" INFRA_CPUSET="$INFRA_CPUSET" RUN_ID="$profile" \
-    docker compose run --rm --no-deps bench run 2>&1 | tee "results/summary-${profile}.txt"
+    docker compose run --rm --no-deps -T bench run 2>&1 | tee "results/summary-${profile}.txt"
 done
 
 echo
