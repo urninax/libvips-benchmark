@@ -64,13 +64,29 @@ echo
 
 mkdir -p results
 
+# minio + toxiproxy are long-running and shared across the whole sweep, and
+# seed only needs to populate MinIO's (tmpfs-backed, in-memory) bucket once -
+# bring all three up explicitly here, then use --no-deps on every per-profile
+# command below. Without --no-deps on the `bench run` step, `docker compose
+# run` was reconciling bench's full dependency graph on every iteration,
+# which re-triggered the "toxics" one-shot as an unsatisfied dependency. That
+# second, implicit toxics run had no LATENCY_PROFILE set (only the explicit
+# `docker compose up --force-recreate --no-deps toxics` line above it did),
+# so it silently fell back to docker-compose.yml's `${LATENCY_PROFILE:-none}`
+# default - resetting toxiproxy to a pass-through "none" config right before
+# every single profile's actual benchmark run, which is why injected latency/
+# bandwidth never showed up in results regardless of which profile was
+# "applied" moments earlier.
+docker compose up -d --wait minio toxiproxy
+docker compose run --rm seed
+
 for profile in none az region degraded; do
   echo "=== Running latency profile: $profile ==="
   LATENCY_PROFILE="$profile" INFRA_CPUSET="$INFRA_CPUSET" \
     docker compose up --force-recreate --no-deps toxics
 
   BENCH_CPUSET="$BENCH_CPUSET" INFRA_CPUSET="$INFRA_CPUSET" RUN_ID="$profile" \
-    docker compose run --rm bench run 2>&1 | tee "results/summary-${profile}.txt"
+    docker compose run --rm --no-deps bench run 2>&1 | tee "results/summary-${profile}.txt"
 done
 
 echo
