@@ -82,7 +82,14 @@ docker compose run --rm -T seed
 
 failed_profiles=()
 
-for profile in none az region degraded; do
+# Defaults to the profiles that actually bracket real S3 (see
+# compose/toxiproxy/apply-toxics.sh for what each one models). The older
+# az/region/degraded profiles are 10/2/0.4 Mbit/s links - 20-70x slower than
+# real S3 - so they overstate the streaming benefit; run them explicitly with
+#   PROFILES="none az region degraded" ./run-sweep.sh
+PROFILES="${PROFILES:-none s3fast s3real s3cross}"
+
+for profile in $PROFILES; do
   echo "=== Running latency profile: $profile ==="
   LATENCY_PROFILE="$profile" INFRA_CPUSET="$INFRA_CPUSET" \
     docker compose up --force-recreate --no-deps toxics
