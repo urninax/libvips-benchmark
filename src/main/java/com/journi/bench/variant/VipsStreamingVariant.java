@@ -209,8 +209,8 @@ public final class VipsStreamingVariant implements Variant {
             return VImage.thumbnailBuffer(arena, VBlob.newFromBytes(arena, bufferedInput), target[0],
                 VipsOption.Int("height", target[1]),
                 VipsOption.Enum("size", VipsSize.SIZE_FORCE),
-                VipsOption.String("output-profile", "srgb"),
-                VipsOption.String("input-profile", iccProfilePath));
+                VipsOption.String("export-profile", "srgb"),
+                VipsOption.String("import-profile", iccProfilePath));
         }
 
         // Streamed fetch: area-fit needs the source's real width/height before a
@@ -243,13 +243,13 @@ public final class VipsStreamingVariant implements Variant {
             ? VImage.thumbnailBuffer(arena, VBlob.newFromBytes(arena, bufferedInput), CONTENT_W,
                 VipsOption.Int("height", CONTENT_H),
                 VipsOption.Enum("crop", VipsInteresting.INTERESTING_CENTRE),
-                VipsOption.String("output-profile", "srgb"),
-                VipsOption.String("input-profile", iccProfilePath))
+                VipsOption.String("export-profile", "srgb"),
+                VipsOption.String("import-profile", iccProfilePath))
             : VImage.thumbnailSource(arena, vsrc, CONTENT_W,
                 VipsOption.Int("height", CONTENT_H),
                 VipsOption.Enum("crop", VipsInteresting.INTERESTING_CENTRE),
-                VipsOption.String("output-profile", "srgb"),
-                VipsOption.String("input-profile", iccProfilePath));
+                VipsOption.String("export-profile", "srgb"),
+                VipsOption.String("import-profile", iccProfilePath));
         return content.embed(BLEED_PX, BLEED_PX, FULL_W, FULL_H,
             VipsOption.Enum("extend", VipsExtend.EXTEND_MIRROR));
     }
