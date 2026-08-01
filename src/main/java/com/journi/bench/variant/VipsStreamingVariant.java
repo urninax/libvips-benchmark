@@ -102,12 +102,12 @@ public final class VipsStreamingVariant implements Variant {
             boolean streamFetch = mode == Mode.B2_STREAMED_BUFFERED || mode == Mode.B3_STREAMED_STREAMED;
             boolean streamPut = mode == Mode.B1_BUFFERED_STREAMED || mode == Mode.B3_STREAMED_STREAMED;
 
-            VImage source;
+            VSource vsrc = null;
             byte[] bufferedInput = null;
             if (streamFetch) {
                 long fs = System.nanoTime();
                 var getResponse = s3.getObject(GetObjectRequest.builder().bucket(bucket).key(sourceKey).build());
-                VSource vsrc = new VCustomSource(arena, readCallback(getResponse, fetchNanos, fs));
+                vsrc = new VCustomSource(arena, readCallback(getResponse, fetchNanos, fs));
                 // The read callback only closes the S3 response stream when it observes EOF
                 // (n <= 0). libvips isn't guaranteed to read a source down to true EOF (e.g. it
                 // may stop once it has enough data to decode/thumbnail), which would otherwise
@@ -121,9 +121,6 @@ public final class VipsStreamingVariant implements Variant {
                     } catch (IOException ignored) {
                     }
                 });
-                source = VImage.newFromSource(arena, vsrc,
-                    VipsOption.Enum("access", VipsAccess.ACCESS_SEQUENTIAL),
-                    VipsOption.Enum("fail-on", VipsFailOn.FAIL_ON_ERROR));
             } else {
                 long fs = System.nanoTime();
                 try (InputStream in = s3.getObject(GetObjectRequest.builder().bucket(bucket).key(sourceKey).build())) {
@@ -133,15 +130,12 @@ public final class VipsStreamingVariant implements Variant {
                 }
                 fetchNanos.set(System.nanoTime() - fs);
                 bytesIn = bufferedInput.length;
-                VSource vsrc = VSource.newFromBytes(arena, bufferedInput);
-                source = VImage.newFromSource(arena, vsrc,
-                    VipsOption.Enum("access", VipsAccess.ACCESS_SEQUENTIAL));
             }
 
             long procStart = System.nanoTime();
             VImage processed = operation == Operation.STANDARD_RESIZE
-                ? standardResize(arena, source)
-                : bleedResize(source);
+                ? standardResize(arena, vsrc, bufferedInput)
+                : bleedResize(arena, vsrc, bufferedInput);
             long procEnd = System.nanoTime();
             outW = (int) processed.getWidth();
             outH = (int) processed.getHeight();
@@ -176,11 +170,21 @@ public final class VipsStreamingVariant implements Variant {
         }
     }
 
-    private VImage standardResize(Arena arena, VImage source) throws VipsError {
-        // thumbnailImage fuses libjpeg shrink-on-load into the decode - the largest
-        // single structural win over GM, since it avoids ever materializing a
-        // full-resolution decoded raster for a downscale.
-        //
+    // thumbnailBuffer/thumbnailSource fuse libjpeg shrink-on-load into the decode -
+    // the largest single structural win over GM, since it avoids ever materializing
+    // a full-resolution decoded raster for a downscale. VImage#thumbnailImage (an
+    // instance method operating on an ALREADY-loaded VImage) explicitly does NOT
+    // get this: its own doc says "not able to exploit shrink-on-load features of
+    // image load libraries, so it can be much slower...only use this operation if
+    // you really have to." The original version of this file loaded via
+    // newFromSource() and then called thumbnailImage() on the result for every
+    // mode, which silently forfeited shrink-on-load everywhere - including "b2"/"b3"
+    // streamed-fetch, defeating the entire point of the streamed variants: bytes
+    // could never be decoded progressively as they arrived, because the loader
+    // node was already committed to a full-resolution decode before any target
+    // size was known.
+
+    private VImage standardResize(Arena arena, VSource vsrc, byte[] bufferedInput) throws VipsError {
         // NOTE: GM's command chain includes `-background "#ffffff" -flatten` to
         // composite any alpha channel onto white before JPEG encode (JPEG has no
         // alpha, so this only matters for sources that HAD one, e.g. PNG input).
@@ -194,6 +198,32 @@ public final class VipsStreamingVariant implements Variant {
         // (e.g. PNG) would NOT get the same white-background compositing GM
         // applies, and output would visibly differ for that case. Flagged as a
         // known gap, not silently working around a real correctness difference.
+        if (bufferedInput != null) {
+            // Bytes are already fully in memory, so a second, throwaway header-only
+            // load (just to learn width/height for areaFit) costs nothing extra -
+            // the real work below still gets a fresh loader built with the shrink
+            // target already known, so thumbnailBuffer can shrink-on-load.
+            VImage peek = VImage.newFromSource(arena, VSource.newFromBytes(arena, bufferedInput),
+                VipsOption.Enum("access", VipsAccess.ACCESS_SEQUENTIAL));
+            int[] target = GmStandardVariant.areaFit((int) peek.getWidth(), (int) peek.getHeight(), TARGET_PIXELS);
+            return VImage.thumbnailBuffer(arena, VBlob.newFromBytes(arena, bufferedInput), target[0],
+                VipsOption.Int("height", target[1]),
+                VipsOption.Enum("size", VipsSize.SIZE_FORCE),
+                VipsOption.String("output-profile", "srgb"),
+                VipsOption.String("input-profile", iccProfilePath));
+        }
+
+        // Streamed fetch: area-fit needs the source's real width/height before a
+        // shrink-on-load decode can be planned, but a live, single-pass network
+        // stream can't be read twice - peeking the header and later reading pixels
+        // would both have to pull from the same vsrc/loader node. So this path
+        // can't get thumbnail_source's shrink-on-load fusion without a second,
+        // separate range-GET purely to sniff dimensions (out of scope here) -
+        // left as the same non-shrink-on-load thumbnailImage() path as before,
+        // called out explicitly rather than silently left half-fixed.
+        VImage source = VImage.newFromSource(arena, vsrc,
+            VipsOption.Enum("access", VipsAccess.ACCESS_SEQUENTIAL),
+            VipsOption.Enum("fail-on", VipsFailOn.FAIL_ON_ERROR));
         int[] target = GmStandardVariant.areaFit((int) source.getWidth(), (int) source.getHeight(), TARGET_PIXELS);
         return source
             .autorot()
@@ -204,14 +234,22 @@ public final class VipsStreamingVariant implements Variant {
                 VipsOption.Enum("size", VipsSize.SIZE_FORCE));
     }
 
-    private VImage bleedResize(VImage source) throws VipsError {
-        VImage content = source
-            .autorot()
-            .iccTransform("srgb", VipsOption.String("input-profile", iccProfilePath))
-            .thumbnailImage(
-                CONTENT_W,
+    private VImage bleedResize(Arena arena, VSource vsrc, byte[] bufferedInput) throws VipsError {
+        // CONTENT_W/CONTENT_H are fixed constants (unlike standardResize's
+        // area-fit target), so this needs no dimension peek at all - both fetch
+        // modes can go straight to the shrink-on-load-capable thumbnail entry
+        // point.
+        VImage content = bufferedInput != null
+            ? VImage.thumbnailBuffer(arena, VBlob.newFromBytes(arena, bufferedInput), CONTENT_W,
                 VipsOption.Int("height", CONTENT_H),
-                VipsOption.Enum("crop", VipsInteresting.INTERESTING_CENTRE));
+                VipsOption.Enum("crop", VipsInteresting.INTERESTING_CENTRE),
+                VipsOption.String("output-profile", "srgb"),
+                VipsOption.String("input-profile", iccProfilePath))
+            : VImage.thumbnailSource(arena, vsrc, CONTENT_W,
+                VipsOption.Int("height", CONTENT_H),
+                VipsOption.Enum("crop", VipsInteresting.INTERESTING_CENTRE),
+                VipsOption.String("output-profile", "srgb"),
+                VipsOption.String("input-profile", iccProfilePath));
         return content.embed(BLEED_PX, BLEED_PX, FULL_W, FULL_H,
             VipsOption.Enum("extend", VipsExtend.EXTEND_MIRROR));
     }
