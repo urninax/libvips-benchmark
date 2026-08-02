@@ -110,6 +110,7 @@ services:
       S3_MAX_CONNECTIONS: "${S3_MAX_CONNECTIONS:-64}"
       S3_TIMEOUT_SECONDS: "${S3_TIMEOUT_SECONDS:-30}"
       BENCH_QUEUE_SIZE: ${BENCH_QUEUE_SIZE:-}
+      BENCH_WORKERS: ${BENCH_WORKERS:-}
       BENCH_WARMUP_RUNS: ${BENCH_WARMUP_RUNS:-2}
       BENCH_MIN_RUNS: ${BENCH_MIN_RUNS:-5}
       VIPS_CONCURRENCY: "1"   # the already-proven-optimal vips deployment model from earlier bash benchmarking

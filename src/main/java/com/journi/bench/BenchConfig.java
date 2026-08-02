@@ -13,6 +13,9 @@ public record BenchConfig(
 
     int cores,
     int queueSize,          // defaults to cores*2, mirrors AppController.scala:71
+    int workers,            // defaults to queueSize (1 job/worker, no backlog); set BENCH_WORKERS
+                            // lower than BENCH_QUEUE_SIZE to test a fixed worker pool draining a
+                            // real backlog instead
     int warmupReps,
     int measuredReps,
 
@@ -29,6 +32,7 @@ public record BenchConfig(
     public static BenchConfig fromEnv() {
         Map<String, String> env = System.getenv();
         int cores = Runtime.getRuntime().availableProcessors();
+        int queueSize = Integer.parseInt(str(env, "BENCH_QUEUE_SIZE", String.valueOf(cores * 2)));
         return new BenchConfig(
             str(env, "S3_ENDPOINT", "http://localhost:9000"),
             Boolean.parseBoolean(str(env, "S3_PATH_STYLE", "true")),
@@ -38,7 +42,8 @@ public record BenchConfig(
             Integer.parseInt(str(env, "S3_TIMEOUT_SECONDS", "30")),
 
             cores,
-            Integer.parseInt(str(env, "BENCH_QUEUE_SIZE", String.valueOf(cores * 2))),
+            queueSize,
+            Integer.parseInt(str(env, "BENCH_WORKERS", String.valueOf(queueSize))),
             Integer.parseInt(str(env, "BENCH_WARMUP_RUNS", "2")),
             Integer.parseInt(str(env, "BENCH_MIN_RUNS", "5")),
 

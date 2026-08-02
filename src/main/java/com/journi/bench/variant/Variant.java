@@ -14,12 +14,14 @@ public interface Variant {
     void tearDown() throws Exception;
 
     /**
-     * Deployment model sizing. GM/IM: cores*2 single-threaded workers (mirrors
-     * AppController.scala:71's imageThreadPool). vips: cores*2 workers too, each
-     * with VIPS_CONCURRENCY=1 - the already-proven-optimal config from the
-     * earlier bash/hyperfine benchmarking, reused here rather than re-swept.
+     * Deployment model sizing. Returns cfg.workers(), which itself defaults to
+     * cfg.queueSize() (mirrors AppController.scala:71's imageThreadPool: one
+     * worker per concurrent request slot, no backlog) - the already-proven-
+     * optimal config from the earlier bash/hyperfine benchmarking, reused here
+     * rather than re-swept. Set BENCH_WORKERS below BENCH_QUEUE_SIZE to instead
+     * test a fixed-size worker pool draining a real backlog.
      */
     default int workerCount(BenchConfig cfg) {
-        return cfg.queueSize();
+        return cfg.workers();
     }
 }
