@@ -1,0 +1,64 @@
+# Benchmark image for GM/IM vs libvips comparison, mirroring production:
+#   - same base image + IM/GM install steps as the real repo Dockerfile
+#     (eclipse-temurin:21.0.7_6-jdk-noble, same apt packages, same
+#     policy.xml patch) for version parity
+#   - linux/amd64, matching production (terraform ECS Fargate default arch)
+#   - adds libvips-tools + hyperfine on top, which the real Dockerfile
+#     doesn't install (not needed for the app itself)
+#
+# Build (from repo root, so conf/imagemagick/sRGB.icc + scripts can be copied in):
+#   docker build --platform linux/amd64 -f Dockerfile.benchmark -t gm-vips-bench .
+#
+# Run any of the benchmark scripts, matching core-api's actual Fargate
+# allocation (8 vCPU, terraform/core-app/environments/prod/variables.tfvars:27).
+# Use --cpuset-cpus (not --cpus) so `nproc` inside the container reports the
+# restricted core count correctly - see benchmark_vips_sweep.sh header:
+#   docker run --rm --platform linux/amd64 --cpuset-cpus=0-7 \
+#     -v "$(pwd)/photo.jpg:/photo.jpg:ro" \
+#     gm-vips-bench /repository/benchmark_vips_sweep.sh /photo.jpg
+
+FROM eclipse-temurin:21.0.7_6-jdk-noble
+
+ENV DEBIAN_FRONTEND=noninteractive
+WORKDIR /repository
+
+# ---- Same ImageMagick install + policy.xml patch as the real Dockerfile ----
+RUN apt-get update && \
+    apt-get install -y imagemagick && \
+    apt-get purge -y ghostscript && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* && \
+    sed -i 's_<policy domain="resource" name="\([widthheight]*\)" value="[0-9]*[KP]*"/>_<policy domain="resource" name="\1" value="20KP"/>_' /etc/ImageMagick-6/policy.xml && \
+    sed -i 's_<policy domain="resource" name="\([memoryarea]*\)" value="[0-9]*[MPMiB]*"/>_<policy domain="resource" name="\1" value="2GiB"/>_' /etc/ImageMagick-6/policy.xml && \
+    convert --version | grep -i "ImageMagick" | head -n 1 | awk '{print $3}' | grep -q "6.9" || exit 1
+
+# ---- Same GraphicsMagick install as the real Dockerfile ----
+RUN apt-get update && \
+    apt-get install -y software-properties-common && \
+    add-apt-repository -y ppa:ubuntuhandbook1/libheif && \
+    apt-get update && \
+    apt-get install -y webp libltdl-dev zlib1g-dev google-perftools libgoogle-perftools-dev libjpeg-dev libpng-dev \
+            libheif1 libheif-plugin-libde265 libbz2-dev libdeflate-dev libheif-dev graphicsmagick && \
+    rm -rf /var/lib/apt/lists/*
+
+# ---- Benchmark-only additions (NOT part of the real production image) ----
+RUN apt-get update && \
+    apt-get install -y libvips-tools wget bc procps time && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN wget -q https://github.com/sharkdp/hyperfine/releases/download/v1.19.0/hyperfine_1.19.0_amd64.deb \
+      -O /tmp/hyperfine.deb && \
+    apt-get install -y /tmp/hyperfine.deb && \
+    rm /tmp/hyperfine.deb
+
+RUN gm version && convert --version && vips --version && hyperfine --version
+
+COPY conf/imagemagick/sRGB.icc /repository/conf/imagemagick/sRGB.icc
+COPY benchmark_resize.sh benchmark_queue_drain.sh benchmark_vips_sweep.sh benchmark_vips_sweep_fixed.sh /repository/
+RUN chmod +x /repository/benchmark_*.sh
+
+# No fixed ENTRYPOINT script - pass the script you want to run as the
+# command, e.g.:
+#   docker run ... gm-vips-bench /repository/benchmark_vips_sweep.sh /photo.jpg
+ENTRYPOINT []
+CMD ["/bin/bash"]

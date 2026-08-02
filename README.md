@@ -146,5 +146,38 @@ predictions of real S3 behavior. A confirmation run against real S3 (point
 Variant A's queue-drain number from this JVM harness should land in the same
 ballpark as the equivalent `benchmark_queue_drain.sh` result on the same
 hardware (from the earlier bash/hyperfine-based investigation in the `core`
-repo's git history/scratchpad). A meaningful divergence there means this
-harness has a bug, not a new finding.
+repo's git history/scratchpad, now vendored into this repo - see below). A
+meaningful divergence there means this harness has a bug, not a new finding.
+
+These scripts predate the JVM/S3/Toxiproxy harness above and are a
+completely separate execution model: no S3/MinIO/Docker Compose stack, no
+streaming question - just GM/IM vs `vipsthumbnail`/`vips` CLI commands run
+directly against a **local photo file** via `hyperfine`, matching the
+concurrency sweep from the original investigation. Run them via
+`Dockerfile.benchmark` (a second, separate image - GM/IM/libvips-tools/
+hyperfine, not the JDK 23/vips-ffm image the main benchmark uses):
+
+```bash
+./run-legacy-benchmark.sh <path-to-real-photo.jpg> [script] [cpuset]
+
+# script: resize | queue_drain | vips_sweep | vips_sweep_fixed (default)
+# cpuset: e.g. 0-7 - distinct physical cores only, see lscpu -e=CPU,CORE
+```
+
+- `resize` - per-output-format timing (thumb/full/webp/png/original), GM vs
+  vips, single image at a time
+- `queue_drain` - today's real deployment model (GM/IM: `cores*2` concurrent
+  single-threaded processes) vs a dedicated-vips-service model (one image at
+  a time, full internal threading)
+- `vips_sweep` / `vips_sweep_fixed` - concurrency × internal-threads-per-
+  process sweep, ranked by throughput; `_fixed` additionally gets exact
+  kernel maxRSS via GNU `time` (falls back to a `ps`-polling sampler if
+  unavailable) and an in-memory pipe for the vips bleed case instead of a
+  temp-file round-trip - prefer `_fixed` unless reproducing the original
+  investigation's exact numbers
+
+**Pass a REAL, representative upload photo** (~4000-8000px on the long
+edge - the size real uploads arrive at before the app downscales them).
+Synthetic/gradient/noise images decode and compress very differently from
+real photographic content and will bias every result. Results land in
+`./results/legacy-<script>-<timestamp>/`.
