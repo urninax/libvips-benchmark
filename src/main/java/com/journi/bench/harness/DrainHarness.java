@@ -35,6 +35,21 @@ public final class DrainHarness {
         int workers = variant.workerCount(cfg);
         int totalReps = cfg.warmupReps() + cfg.measuredReps();
 
+        // All variants in a `run` share one continuous JVM process (see class doc), and
+        // rssSampler.resetPeaks() below only zeroes the TRACKING counters - it can't make
+        // the OS give back heap/metaspace/connection-pool memory a PRIOR variant already
+        // grew into. Without this baseline, a variant that happens to run later (every
+        // vips variant runs after GM/IM - see Main.run()) silently reports peak RSS that
+        // includes memory it never actually needed itself. System.gc() gives G1 a chance
+        // to hand back what it can before we snapshot; what's left is genuinely shared,
+        // unavoidable JVM baseline (this variant's own one-time setUp() cost, e.g.
+        // Vips.init() loading libvips, is deliberately INSIDE this baseline too - a real
+        // server pays that once at startup, not per job, so excluding it from every
+        // variant's reported number is the fair comparison for capacity planning).
+        System.gc();
+        Thread.sleep(50);
+        long baselineSelfKb = rssSampler.currentSelfKb();
+
         List<Double> drainSecondsMeasured = new ArrayList<>();
         List<JobResult> measuredResults = Collections.synchronizedList(new ArrayList<>());
         long peakSelfKb = 0, peakChildrenKb = 0, peakTotalKb = 0, vmHwmKb = 0;
@@ -134,10 +149,18 @@ public final class DrainHarness {
             ? 100.0 * cpuNanosTotal / ((double) wallNanosTotal * cfg.cores())
             : 0;
 
+        // Subtract the pre-variant baseline so peakSelfKb/peakTotalKb reflect what THIS
+        // variant's measured reps actually added, not memory a prior variant already left
+        // resident in the shared JVM process (see the baseline capture above). Children are
+        // this variant's own forked processes - never present at baseline - so peakChildrenKb
+        // needs no adjustment.
+        long peakSelfKbIsolated = Math.max(0, peakSelfKb - baselineSelfKb);
+        long peakTotalKbIsolated = Math.max(peakChildrenKb, peakTotalKb - baselineSelfKb);
+
         return new DrainStats(
             variant.name(), workers, keys.size(),
             drainStats, throughput,
-            peakSelfKb, peakChildrenKb, peakTotalKb, vmHwmKb,
+            peakSelfKbIsolated, peakChildrenKb, peakTotalKbIsolated, vmHwmKb,
             Stats.percentile(latenciesMs, 0.50),
             Stats.percentile(latenciesMs, 0.95),
             Stats.percentile(latenciesMs, 0.99),

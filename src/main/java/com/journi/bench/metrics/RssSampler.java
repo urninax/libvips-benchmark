@@ -81,6 +81,20 @@ public final class RssSampler implements Runnable {
     public long peakChildrenKb() { return peakChildrenKb; }
     public long peakTotalKb() { return peakTotalKb; }
 
+    /**
+     * Current (not peak) self RSS, read directly rather than via the sampler
+     * thread's tracked high-water mark. Used to snapshot a baseline immediately
+     * before a variant's measured reps start - {@link #resetPeaks()} only zeroes
+     * the tracking counters, it can't make the OS reclaim JVM heap/metaspace
+     * already grown by whatever variant ran before this one in the same
+     * process, so without subtracting this baseline, a later variant's "peak"
+     * silently includes memory it never actually needed.
+     */
+    public long currentSelfKb() {
+        long kb = readVmRssKb(selfPid);
+        return kb > 0 ? kb : 0;
+    }
+
     private static long readVmRssKb(long pid) {
         return readStatusField(pid, "VmRSS:");
     }

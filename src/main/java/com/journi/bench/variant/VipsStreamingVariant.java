@@ -107,7 +107,16 @@ public final class VipsStreamingVariant implements Variant {
             if (streamFetch) {
                 long fs = System.nanoTime();
                 var getResponse = s3.getObject(GetObjectRequest.builder().bucket(bucket).key(sourceKey).build());
-                vsrc = new VCustomSource(arena, readCallback(getResponse, fetchNanos, fs));
+                // getObject() blocks for the connection + response-header round-trip before
+                // returning - that's real fetch cost (one latency hop), but was previously
+                // invisible to fetchNanos, which only started accumulating time inside the
+                // read callback below. Buffered fetch times its "fetch" as one continuous span
+                // starting here (see the else branch), so credit this span the same way -
+                // otherwise streamed fetch silently understates its own cost as pure latency
+                // grows, which pulls the overlap ratio below 1.0 even when genuine I/O/compute
+                // overlap is happening (visible instead in higher CPU utilization).
+                fetchNanos.set(System.nanoTime() - fs);
+                vsrc = new VCustomSource(arena, readCallback(getResponse, fetchNanos));
                 // The read callback only closes the S3 response stream when it observes EOF
                 // (n <= 0). libvips isn't guaranteed to read a source down to true EOF (e.g. it
                 // may stop once it has enough data to decode/thumbnail), which would otherwise
@@ -262,7 +271,7 @@ public final class VipsStreamingVariant implements Variant {
      * surface). single read(), not readNBytes(): 0 return means EOF to libvips,
      * -1 means error - NOT the same as a short read.
      */
-    private static VCustomSource.ReadCallback readCallback(InputStream in, AtomicReference<Long> fetchNanosAcc, long fetchStartNanos) {
+    private static VCustomSource.ReadCallback readCallback(InputStream in, AtomicReference<Long> fetchNanosAcc) {
         byte[] scratch = new byte[READ_SCRATCH_SIZE];
         return (MemorySegment dataPointer, long length) -> {
             long ioStart = System.nanoTime();
