@@ -53,10 +53,17 @@ detect_topology() {
   INFRA_CPUSET_AUTO=$(IFS=,; echo "${infra_cpus[*]:-${bench_cpus[*]}}")
 }
 
-detect_topology
-
-BENCH_CPUSET="${1:-$BENCH_CPUSET_AUTO}"
-INFRA_CPUSET="${2:-$INFRA_CPUSET_AUTO}"
+# Only run lscpu-based detection when it's actually needed - if both cpusets
+# were passed explicitly, honor them with zero lscpu dependency (matters on
+# hosts without procps, e.g. running this from a Mac, or non-Linux containers).
+if [[ $# -ge 2 ]]; then
+  BENCH_CPUSET="$1"
+  INFRA_CPUSET="$2"
+else
+  detect_topology
+  BENCH_CPUSET="${1:-$BENCH_CPUSET_AUTO}"
+  INFRA_CPUSET="${2:-$INFRA_CPUSET_AUTO}"
+fi
 
 echo "Detected/using: BENCH_CPUSET=$BENCH_CPUSET  INFRA_CPUSET=$INFRA_CPUSET"
 echo "(one thread per distinct physical core for BENCH; verify with: lscpu -e=CPU,CORE)"
