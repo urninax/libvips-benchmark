@@ -69,6 +69,14 @@ echo "Detected/using: BENCH_CPUSET=$BENCH_CPUSET  INFRA_CPUSET=$INFRA_CPUSET"
 echo "(one thread per distinct physical core for BENCH; verify with: lscpu -e=CPU,CORE)"
 echo
 
+# Export so every `docker compose` call below picks these up, including the
+# minio/toxiproxy/seed bring-up right after this - a plain shell assignment
+# does NOT propagate to child processes on its own, so without this export
+# those specific commands were silently falling back to docker-compose.yml's
+# hardcoded default cpuset ("${INFRA_CPUSET:-8-15}", sized for a 16-thread
+# machine) instead of what was just detected/passed above.
+export BENCH_CPUSET INFRA_CPUSET
+
 mkdir -p results
 
 # minio + toxiproxy are long-running and shared across the whole sweep, and
