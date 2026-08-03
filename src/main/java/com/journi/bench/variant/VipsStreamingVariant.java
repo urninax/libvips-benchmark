@@ -7,6 +7,7 @@ import app.photofox.vipsffm.enums.VipsFailOn;
 import app.photofox.vipsffm.enums.VipsInteresting;
 import app.photofox.vipsffm.enums.VipsSize;
 import com.journi.bench.BenchConfig;
+import com.journi.bench.ImageFormat;
 import com.journi.bench.harness.JobResult;
 import com.journi.bench.s3.StreamingPartUploadOutputStream;
 import software.amazon.awssdk.core.sync.RequestBody;
@@ -58,15 +59,20 @@ public final class VipsStreamingVariant implements Variant {
     private final Operation operation;
     private final long partSizeBytes;
     private final String iccProfilePath;
+    private final ImageFormat inputFormat;
+    private final ImageFormat outputFormat;
 
     public VipsStreamingVariant(S3Client s3, String bucket, Mode mode, Operation operation,
-                                 long partSizeBytes, String iccProfilePath) {
+                                 long partSizeBytes, String iccProfilePath,
+                                 ImageFormat inputFormat, ImageFormat outputFormat) {
         this.s3 = s3;
         this.bucket = bucket;
         this.mode = mode;
         this.operation = operation;
         this.partSizeBytes = partSizeBytes;
         this.iccProfilePath = iccProfilePath;
+        this.inputFormat = inputFormat;
+        this.outputFormat = outputFormat;
     }
 
     @Override
@@ -74,7 +80,8 @@ public final class VipsStreamingVariant implements Variant {
         return "vips " + mode.name().substring(0, 2).toLowerCase() + " " + operation.name().toLowerCase()
             + " (" + (mode == Mode.B0_BUFFERED_BUFFERED ? "buffered/buffered" :
                       mode == Mode.B1_BUFFERED_STREAMED ? "buffered/streamed" :
-                      mode == Mode.B2_STREAMED_BUFFERED ? "streamed/buffered" : "streamed/streamed") + ")";
+                      mode == Mode.B2_STREAMED_BUFFERED ? "streamed/buffered" : "streamed/streamed") + ")"
+            + " [" + inputFormat.ext + "->" + outputFormat.ext + "]";
     }
 
     @Override
@@ -148,6 +155,7 @@ public final class VipsStreamingVariant implements Variant {
             VImage processed = operation == Operation.STANDARD_RESIZE
                 ? standardResize(arena, vsrc, bufferedInput)
                 : bleedResize(arena, vsrc, bufferedInput);
+            processed = flattenIfNeeded(processed);
             long procEnd = System.nanoTime();
             outW = (int) processed.getWidth();
             outH = (int) processed.getHeight();
@@ -157,14 +165,14 @@ public final class VipsStreamingVariant implements Variant {
                 try (StreamingPartUploadOutputStream upload =
                          new StreamingPartUploadOutputStream(s3, bucket, destKey, partSizeBytes)) {
                     VTarget vtgt = new VCustomTarget(arena, writeCallback(upload), endCallback(upload));
-                    processed.jpegsaveTarget(vtgt, VipsOption.Int("Q", 85), VipsOption.Boolean("strip", true));
+                    saveToTarget(processed, vtgt);
                     bytesOut = upload.totalBytesWritten();
                 }
                 uploadNanos.set(System.nanoTime() - us);
             } else {
                 long us = System.nanoTime();
                 VTarget memTarget = VTarget.newToMemory(arena);
-                processed.jpegsaveTarget(memTarget, VipsOption.Int("Q", 85), VipsOption.Boolean("strip", true));
+                saveToTarget(processed, memTarget);
                 byte[] outBytes = memTarget.getBlob().getBytes();
                 bytesOut = outBytes.length;
                 s3.putObject(
@@ -179,6 +187,37 @@ public final class VipsStreamingVariant implements Variant {
                 bytesIn, bytesOut, outW, outH);
         } catch (Exception e) {
             return JobResult.failure(sourceKey, e.toString(), System.nanoTime() - t0);
+        }
+    }
+
+    /**
+     * Composites any alpha channel onto white when saving to a format that can't carry
+     * alpha (JPEG) - a no-op for opaque sources or alpha-capable output formats (PNG/WebP).
+     * <p>
+     * NOTE ON THE PREVIOUSLY-REPORTED flatten() BUG: calling
+     * .flatten(VipsOption.ArrayDouble("background", [255,255,255])) on a NON-alpha image
+     * reproducibly throws "linear: vector must have 1 or 2 elements" - confirmed via the
+     * `vips` CLI directly, independent of vips-ffm, so it's a real libvips quirk (flatten
+     * on an image with no alpha band apparently routes the background vector through a
+     * path that only accepts 1-2 elements). It is NOT a bug in flatten() on real
+     * alpha-channel input - verified empirically against an actual alpha PNG, where the
+     * exact same call succeeds with no error. The original investigation only ever tested
+     * flat opaque JPEG fixtures, so it never actually exercised flatten()'s real path -
+     * the fix is simply to never call it unless the image actually has an alpha channel
+     * to flatten, which is also the only case where calling it makes sense.
+     */
+    private VImage flattenIfNeeded(VImage image) throws VipsError {
+        if (!outputFormat.supportsAlpha && image.hasAlpha()) {
+            return image.flatten(VipsOption.ArrayDouble("background", List.of(255.0, 255.0, 255.0)));
+        }
+        return image;
+    }
+
+    private void saveToTarget(VImage image, VTarget target) throws VipsError {
+        switch (outputFormat) {
+            case JPG -> image.jpegsaveTarget(target, VipsOption.Int("Q", 85), VipsOption.Boolean("strip", true));
+            case PNG -> image.pngsaveTarget(target, VipsOption.Boolean("strip", true));
+            case WEBP -> image.webpsaveTarget(target, VipsOption.Int("Q", 85), VipsOption.Boolean("strip", true));
         }
     }
 
@@ -198,18 +237,12 @@ public final class VipsStreamingVariant implements Variant {
 
     private VImage standardResize(Arena arena, VSource vsrc, byte[] bufferedInput) throws VipsError {
         // NOTE: GM's command chain includes `-background "#ffffff" -flatten` to
-        // composite any alpha channel onto white before JPEG encode (JPEG has no
-        // alpha, so this only matters for sources that HAD one, e.g. PNG input).
-        // The vips-ffm .flatten(ArrayDouble("background", [255,255,255])) call
-        // reproducibly throws "linear: vector must have 1 or 2 elements" - a real
-        // vips-ffm option-routing bug/mismatch, not yet resolved (bleedResize()
-        // below has no flatten call and has 0 failures, confirming this is the
-        // culprit). Dropped for now since both fixtures (baseline/progressive
-        // JPEG) have no alpha channel, so flatten is a no-op for this benchmark's
-        // actual test images either way - but this means an alpha-channel source
-        // (e.g. PNG) would NOT get the same white-background compositing GM
-        // applies, and output would visibly differ for that case. Flagged as a
-        // known gap, not silently working around a real correctness difference.
+        // composite any alpha channel onto white before JPEG encode. The equivalent
+        // here is applied AFTER resize, in flattenIfNeeded() (called from process()) -
+        // see that method's doc for why flatten() is only called when the image
+        // actually has an alpha channel (calling it unconditionally on an opaque
+        // source throws, which is what an earlier version of this comment
+        // misattributed to a vips-ffm bug).
         if (bufferedInput != null) {
             // Bytes are already fully in memory, so a second, throwaway header-only
             // load (just to learn width/height for areaFit) costs nothing extra -

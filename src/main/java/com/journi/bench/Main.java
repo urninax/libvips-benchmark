@@ -31,19 +31,20 @@ public final class Main {
         }
     }
 
-    /** Uploads baseline.jpg/progressive.jpg from samples/ under N distinct keys, so every job fetches a distinct object. */
+    /** Uploads baseline/progressive fixtures (in cfg.inputFormat()) from samples/ under N distinct keys, so every job fetches a distinct object. */
     private static void seed(BenchConfig cfg) throws IOException {
         S3Client s3 = S3Support.buildClient(cfg);
         ensureBucket(s3, cfg.s3Bucket());
 
-        byte[] baseline = Files.readAllBytes(Path.of("samples/baseline.jpg"));
-        byte[] progressive = Files.readAllBytes(Path.of("samples/progressive.jpg"));
+        String ext = cfg.inputFormat().ext;
+        byte[] baseline = Files.readAllBytes(Path.of("samples/baseline." + ext));
+        byte[] progressive = Files.readAllBytes(Path.of("samples/progressive." + ext));
 
-        upload(s3, cfg.s3Bucket(), "fixtures/baseline.jpg", baseline);
-        upload(s3, cfg.s3Bucket(), "fixtures/progressive.jpg", progressive);
+        upload(s3, cfg.s3Bucket(), "fixtures/baseline." + ext, baseline);
+        upload(s3, cfg.s3Bucket(), "fixtures/progressive." + ext, progressive);
 
-        System.out.println("Seeded fixtures/baseline.jpg (" + baseline.length + " bytes) and "
-            + "fixtures/progressive.jpg (" + progressive.length + " bytes) into bucket " + cfg.s3Bucket());
+        System.out.println("Seeded fixtures/baseline." + ext + " (" + baseline.length + " bytes) and "
+            + "fixtures/progressive." + ext + " (" + progressive.length + " bytes) into bucket " + cfg.s3Bucket());
     }
 
     private static void ensureBucket(S3Client s3, String bucket) {
@@ -90,10 +91,12 @@ public final class Main {
 
         DrainHarness harness = new DrainHarness(rssSampler);
 
-        List<String> keys = Arrays.asList(cfg.keys());
+        String inExt = cfg.inputFormat().ext;
+        List<String> keys = Arrays.stream(cfg.keys()).map(k -> k + "." + inExt).collect(Collectors.toList());
         System.out.println("=== libvips-benchmark ===");
         System.out.println("cores=" + cfg.cores() + " queueSize=" + cfg.queueSize()
             + " warmup=" + cfg.warmupReps() + " measuredReps=" + cfg.measuredReps()
+            + " inputFormat=" + cfg.inputFormat() + " outputFormat=" + cfg.outputFormat()
             + " keys=" + keys);
 
         List<String> standardKeys = expandToQueueSize(keys, cfg.queueSize());
@@ -101,12 +104,13 @@ public final class Main {
         // ---- Standard resize ----
         List<DrainStats> standardResults = new ArrayList<>();
         standardResults.add(harness.run(
-            new GmStandardVariant(s3, cfg.s3Bucket(), Path.of(iccResourcePath), workDir, rssSampler),
+            new GmStandardVariant(s3, cfg.s3Bucket(), Path.of(iccResourcePath), workDir, rssSampler,
+                cfg.inputFormat(), cfg.outputFormat()),
             cfg, standardKeys));
         for (VipsStreamingVariant.Mode mode : VipsStreamingVariant.Mode.values()) {
             standardResults.add(harness.run(
                 new VipsStreamingVariant(s3, cfg.s3Bucket(), mode, VipsStreamingVariant.Operation.STANDARD_RESIZE,
-                    cfg.partSizeBytes(), iccResourcePath),
+                    cfg.partSizeBytes(), iccResourcePath, cfg.inputFormat(), cfg.outputFormat()),
                 cfg, standardKeys));
         }
         ResultTable.print("Standard resize", standardResults);
@@ -114,12 +118,13 @@ public final class Main {
         // ---- Bleed resize ----
         List<DrainStats> bleedResults = new ArrayList<>();
         bleedResults.add(harness.run(
-            new ImBleedVariant(s3, cfg.s3Bucket(), Path.of(iccResourcePath), workDir, rssSampler),
+            new ImBleedVariant(s3, cfg.s3Bucket(), Path.of(iccResourcePath), workDir, rssSampler,
+                cfg.inputFormat(), cfg.outputFormat()),
             cfg, standardKeys));
         for (VipsStreamingVariant.Mode mode : VipsStreamingVariant.Mode.values()) {
             bleedResults.add(harness.run(
                 new VipsStreamingVariant(s3, cfg.s3Bucket(), mode, VipsStreamingVariant.Operation.BLEED_RESIZE,
-                    cfg.partSizeBytes(), iccResourcePath),
+                    cfg.partSizeBytes(), iccResourcePath, cfg.inputFormat(), cfg.outputFormat()),
                 cfg, standardKeys));
         }
         ResultTable.print("Bleed resize", bleedResults);
