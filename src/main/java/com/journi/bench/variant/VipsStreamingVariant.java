@@ -20,6 +20,7 @@ import java.io.InputStream;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -49,6 +50,7 @@ public final class VipsStreamingVariant implements Variant {
     private static final int CONTENT_W = 2480, CONTENT_H = 3508, BLEED_PX = 36;
     private static final int FULL_W = CONTENT_W + 2 * BLEED_PX, FULL_H = CONTENT_H + 2 * BLEED_PX;
     private static final int READ_SCRATCH_SIZE = 256 * 1024;
+    private static Boolean readCallbackDebug;
 
     private final S3Client s3;
     private final String bucket;
@@ -78,6 +80,7 @@ public final class VipsStreamingVariant implements Variant {
     @Override
     public void setUp(BenchConfig cfg) {
         Vips.init();
+        this.readCallbackDebug = cfg.readCallbackDebug();
         // NON-NEGOTIABLE: libvips caches ~100 operations by default, which
         // would make repeated drains of the same fixture images fraudulently
         // fast. Disabling this also better models a real long-running server.
@@ -273,7 +276,10 @@ public final class VipsStreamingVariant implements Variant {
      */
     private static VCustomSource.ReadCallback readCallback(InputStream in, AtomicReference<Long> fetchNanosAcc) {
         byte[] scratch = new byte[READ_SCRATCH_SIZE];
+        AtomicInteger callCount = new AtomicInteger(0);
         return (MemorySegment dataPointer, long length) -> {
+            int call = callCount.incrementAndGet();
+            if (readCallbackDebug && (call % 10 == 0)) System.err.println("[callback] read call #" + call + ", want " + length + " bytes");
             long ioStart = System.nanoTime();
             try {
                 int want = (int) Math.min(length, scratch.length);
