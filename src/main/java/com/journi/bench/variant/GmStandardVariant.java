@@ -124,11 +124,22 @@ public final class GmStandardVariant implements Variant {
     }
 
     private int[] identifyDims(Path file) throws IOException, InterruptedException {
-        Process p = new ProcessBuilder("gm", "identify", "-format", "%w %h", file.toString())
-            .redirectErrorStream(false)
-            .start();
-        String out = new String(p.getInputStream().readAllBytes());
-        p.waitFor(10, java.util.concurrent.TimeUnit.SECONDS);
+        ProcessBuilder pb = new ProcessBuilder("gm", "identify", "-format", "%w %h", file.toString());
+        pb.redirectErrorStream(true);
+        Process p = pb.start();
+        String out;
+        try (InputStream in = p.getInputStream()) {
+            out = new String(in.readAllBytes());
+        }
+        boolean finished = p.waitFor(10, java.util.concurrent.TimeUnit.SECONDS);
+        if (!finished) {
+            p.destroyForcibly();
+            throw new IOException("gm identify timed out after 10s: " + file);
+        }
+        int exit = p.exitValue();
+        if (exit != 0) {
+            throw new IOException("gm identify exited " + exit + ": " + out);
+        }
         String[] parts = out.trim().split("\\s+");
         return new int[]{Integer.parseInt(parts[0]), Integer.parseInt(parts[1])};
     }
