@@ -27,6 +27,7 @@ public record BenchConfig(
     String[] keys,          // S3 keys to seed/process
 
     String resultsDir,
+    Boolean progressEnabled,
     String runId
 ) {
     public static BenchConfig fromEnv() {
@@ -55,6 +56,7 @@ public record BenchConfig(
             str(env, "BENCH_KEYS", "fixtures/baseline.jpg,fixtures/progressive.jpg").split(","),
 
             str(env, "RESULTS_DIR", "/results"),
+            Boolean.parseBoolean(str(env, "PROGRESS_ENABLED", "true")),
             str(env, "RUN_ID", "default")
         );
     }
