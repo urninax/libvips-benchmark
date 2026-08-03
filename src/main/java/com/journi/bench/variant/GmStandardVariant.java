@@ -50,6 +50,22 @@ public final class GmStandardVariant implements Variant {
         return "GM standard resize (fetch-then-process)";
     }
 
+    /**
+     * Deliberately NOT cfg.workers(): GM forks a full separate OS process per
+     * job, each loading its own copy of libGraphicsMagick and decoding the
+     * image into private memory - unlike vips' in-process, arena-based
+     * concurrency, this doesn't scale gracefully with worker count. Confirmed
+     * via OOM: 32 concurrent `convert`/`gm` children plus the JVM's own
+     * footprint exceeded this container's 8g mem_limit, when the point of
+     * raising BENCH_WORKERS was to find vips' own ceiling, not to blow up the
+     * fixed baseline it's being compared against. Capped at the already-
+     * proven-safe cores*2 model regardless of how high BENCH_WORKERS goes.
+     */
+    @Override
+    public int workerCount(BenchConfig cfg) {
+        return Math.min(cfg.workers(), cfg.cores() * 2);
+    }
+
     @Override
     public void setUp(BenchConfig cfg) throws Exception {
         Files.createDirectories(workDir);

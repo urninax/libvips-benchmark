@@ -34,7 +34,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * available in the authoring environment). First `mvn compile` on the
  * target machine is expected to surface any final signature corrections -
  * treat this file as the spike, not as pre-verified.
- *
+ * <p>
  * access=ACCESS_SEQUENTIAL is the single most important option here - it
  * tells libvips it may stream forward-only and never revisit, which is what
  * actually keeps memory low. Without it libvips assumes random access and

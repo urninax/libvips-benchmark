@@ -48,6 +48,19 @@ public final class ImBleedVariant implements Variant {
         return "IM bleed resize (fetch-then-process)";
     }
 
+    /**
+     * Deliberately NOT cfg.workers() - see GmStandardVariant.workerCount()'s
+     * comment. IM's per-process footprint (full separate OS process per job)
+     * matters even more here than for standard resize: bleed's uncompressed
+     * working set is larger, and this variant alone was already at ~8GB total
+     * RSS at only 16 concurrent workers in earlier runs. Capped at cores*2
+     * regardless of how high BENCH_WORKERS goes for vips' own scaling tests.
+     */
+    @Override
+    public int workerCount(BenchConfig cfg) {
+        return Math.min(cfg.workers(), cfg.cores() * 2);
+    }
+
     @Override
     public void setUp(BenchConfig cfg) throws Exception {
         Files.createDirectories(workDir);

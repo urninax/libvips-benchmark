@@ -10,6 +10,8 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Repeated queue-drain benchmark within ONE JVM process (warmup + measured
@@ -21,6 +23,18 @@ import java.util.concurrent.*;
  * exit once the queue is drained rather than blocking for more work.
  */
 public final class DrainHarness {
+
+    // Prints a running "how far did it get" line every PROGRESS_INTERVAL_MS
+    // while a rep is draining. Exists for soak/capacity tests where the queue
+    // is deliberately huge (far bigger than any rep normally finishes) and the
+    // process might get OOM-killed mid-drain - without this, a crash mid-rep
+    // leaves the tee'd log with zero indication of how many jobs completed
+    // before it died (this bit us for real: an OOM kill during the Bleed
+    // phase left no trace beyond the kernel's own dmesg log). Self-throttling
+    // by construction: a rep that finishes faster than one interval never
+    // gets a chance to print anything, so normal small-queue runs are
+    // unaffected.
+    private static final long PROGRESS_INTERVAL_MS = 2000;
 
     private final RssSampler rssSampler;
     private final CpuSampler cpuSampler = new CpuSampler();
@@ -78,7 +92,26 @@ public final class DrainHarness {
                 GcSampler.Snapshot gcBefore = gcSampler.snapshot();
                 long cpuBefore = cpuSampler.jvmProcessCpuNanos() + cpuSampler.reapedChildrenCpuNanos();
 
+                AtomicLong completed = new AtomicLong(0);
+                AtomicBoolean repRunning = new AtomicBoolean(true);
                 long t0 = System.nanoTime();
+
+                Thread progress = new Thread(() -> {
+                    while (repRunning.get()) {
+                        try {
+                            Thread.sleep(PROGRESS_INTERVAL_MS);
+                        } catch (InterruptedException e) {
+                            return;
+                        }
+                        if (!repRunning.get()) return;
+                        System.out.printf("[progress] %s rep=%d/%d completed=%d/%d elapsed=%.1fs rssSelfMB=%.1f%n",
+                            variant.name(), repIndex + 1, totalReps, completed.get(), keys.size(),
+                            (System.nanoTime() - t0) / 1e9, rssSampler.currentSelfKb() / 1024.0);
+                    }
+                }, "progress");
+                progress.setDaemon(true);
+                progress.start();
+
                 for (int i = 0; i < workers; i++) {
                     pool.submit(() -> {
                         try {
@@ -93,6 +126,7 @@ public final class DrainHarness {
                                     result = JobResult.failure(key, e.toString(), System.nanoTime() - jobStart);
                                 }
                                 repResults.add(result);
+                                completed.incrementAndGet();
                             }
                         } finally {
                             done.countDown();
@@ -101,6 +135,8 @@ public final class DrainHarness {
                 }
                 done.await();
                 long drainNanos = System.nanoTime() - t0;
+                repRunning.set(false);
+                progress.interrupt();
                 pool.shutdown();
                 pool.awaitTermination(30, TimeUnit.SECONDS);
 
