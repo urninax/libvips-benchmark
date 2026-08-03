@@ -105,12 +105,15 @@ public final class DrainHarness {
                         }
                         if (!repRunning.get()) return;
                         System.out.printf("[progress] %s rep=%d/%d completed=%d/%d elapsed=%.1fs rssSelfMB=%.1f%n",
-                            variant.name(), repIndex + 1, totalReps, completed.get(), keys.size(),
-                            (System.nanoTime() - t0) / 1e9, rssSampler.currentSelfKb() / 1024.0);
+                                variant.name(), repIndex + 1, totalReps, completed.get(), keys.size(),
+                                (System.nanoTime() - t0) / 1e9, rssSampler.currentSelfKb() / 1024.0);
                     }
                 }, "progress");
-                progress.setDaemon(true);
-                progress.start();
+
+                if(cfg.progressEnabled()) {
+                    progress.setDaemon(true);
+                    progress.start();
+                }
 
                 for (int i = 0; i < workers; i++) {
                     pool.submit(() -> {
@@ -136,7 +139,9 @@ public final class DrainHarness {
                 done.await();
                 long drainNanos = System.nanoTime() - t0;
                 repRunning.set(false);
-                progress.interrupt();
+                if(cfg.progressEnabled()) {
+                    progress.interrupt();
+                }
                 pool.shutdown();
                 pool.awaitTermination(30, TimeUnit.SECONDS);
 

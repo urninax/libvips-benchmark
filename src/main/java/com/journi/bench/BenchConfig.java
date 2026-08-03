@@ -31,6 +31,8 @@ public record BenchConfig(
     ImageFormat outputFormat, // BENCH_OUTPUT_FORMAT: jpg, png, or webp - which format gets saved/uploaded
 
     String resultsDir,
+    Boolean readCallbackDebug,
+    Boolean progressEnabled,
     String runId
 ) {
     public static BenchConfig fromEnv() {
@@ -62,6 +64,8 @@ public record BenchConfig(
             ImageFormat.fromEnv(str(env, "BENCH_OUTPUT_FORMAT", "jpg")),
 
             str(env, "RESULTS_DIR", "/results"),
+            Boolean.parseBoolean(str(env, "READ_CALLBACK_DEBUG", "false")),
+            Boolean.parseBoolean(str(env, "PROGRESS_ENABLED", "true")),
             str(env, "RUN_ID", "default")
         );
     }

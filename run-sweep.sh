@@ -102,7 +102,7 @@ failed_profiles=()
 # az/region/degraded profiles are 10/2/0.4 Mbit/s links - 20-70x slower than
 # real S3 - so they overstate the streaming benefit; run them explicitly with
 #   PROFILES="none az region degraded" ./run-sweep.sh
-PROFILES="${PROFILES:-none s3fast s3real s3cross}"
+PROFILES="${PROFILES:-s3real none s3fast s3cross}"
 
 for profile in $PROFILES; do
   echo "=== Running latency profile: $profile ==="

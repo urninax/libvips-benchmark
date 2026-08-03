@@ -113,6 +113,8 @@ services:
       BENCH_WORKERS: ${BENCH_WORKERS:-}
       BENCH_WARMUP_RUNS: ${BENCH_WARMUP_RUNS:-2}
       BENCH_MIN_RUNS: ${BENCH_MIN_RUNS:-5}
+      PROGRESS_ENABLED: ${PROGRESS_ENABLED:-true}
+      READ_CALLBACK_DEBUG: ${READ_CALLBACK_DEBUG:-false}
       VIPS_CONCURRENCY: "1"   # the already-proven-optimal vips deployment model from earlier bash benchmarking
       RESULTS_DIR: /results
       RUN_ID: ${RUN_ID:-default}
