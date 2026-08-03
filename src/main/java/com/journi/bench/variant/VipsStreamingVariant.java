@@ -45,7 +45,7 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public final class VipsStreamingVariant implements Variant {
 
-    public enum Mode { B0_BUFFERED_BUFFERED, B1_BUFFERED_STREAMED, B2_STREAMED_BUFFERED, B3_STREAMED_STREAMED }
+    public enum Mode {B0_BUFF_BUFF, B1_BUFF_STR, B2_STR_BUFF, B3_STR_STR}
     public enum Operation { STANDARD_RESIZE, BLEED_RESIZE }
 
     private static final long TARGET_PIXELS = 2_250_000L;
@@ -79,9 +79,9 @@ public final class VipsStreamingVariant implements Variant {
     @Override
     public String name() {
         return "vips " + mode.name().substring(0, 2).toLowerCase() + " " + operation.name().toLowerCase()
-            + " (" + (mode == Mode.B0_BUFFERED_BUFFERED ? "buffered/buffered" :
-                      mode == Mode.B1_BUFFERED_STREAMED ? "buffered/streamed" :
-                      mode == Mode.B2_STREAMED_BUFFERED ? "streamed/buffered" : "streamed/streamed") + ")"
+            + " (" + (mode == Mode.B0_BUFF_BUFF ? "buff/buff" :
+                      mode == Mode.B1_BUFF_STR ? "buff/str" :
+                      mode == Mode.B2_STR_BUFF ? "str/buff" : "str/str") + ")"
             + " [" + inputFormat.ext + "->" + outputFormat.ext + "]";
     }
 
@@ -110,8 +110,8 @@ public final class VipsStreamingVariant implements Variant {
                                                  // threadpool may invoke our callbacks from a
                                                  // thread other than the one that created the
                                                  // arena; confined arenas throw in that case.
-            boolean streamFetch = mode == Mode.B2_STREAMED_BUFFERED || mode == Mode.B3_STREAMED_STREAMED;
-            boolean streamPut = mode == Mode.B1_BUFFERED_STREAMED || mode == Mode.B3_STREAMED_STREAMED;
+            boolean streamFetch = mode == Mode.B2_STR_BUFF || mode == Mode.B3_STR_STR;
+            boolean streamPut = mode == Mode.B1_BUFF_STR || mode == Mode.B3_STR_STR;
 
             VSource vsrc = null;
             byte[] bufferedInput = null;
