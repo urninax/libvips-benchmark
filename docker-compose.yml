@@ -121,6 +121,8 @@ services:
       READ_CALLBACK_DEBUG: ${READ_CALLBACK_DEBUG:-false}
       BENCH_INPUT_FORMAT: ${BENCH_INPUT_FORMAT:-jpg}
       BENCH_OUTPUT_FORMAT: ${BENCH_OUTPUT_FORMAT:-jpg}
+      # e.g. BENCH_ENGINES=vips to skip the GM/IM baseline entirely and only run vips variants
+      BENCH_ENGINES: ${BENCH_ENGINES:-gm,im,vips}
       VIPS_CONCURRENCY: "1"   # the already-proven-optimal vips deployment model from earlier bash benchmarking
       RESULTS_DIR: /results
       RUN_ID: ${RUN_ID:-default}
