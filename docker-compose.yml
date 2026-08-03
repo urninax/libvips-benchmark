@@ -76,6 +76,10 @@ services:
     environment:
       <<: *s3-env
       S3_ENDPOINT: http://minio:9000
+      # MUST match `bench`'s BENCH_INPUT_FORMAT - seed only uploads the fixture for ONE
+      # format, and bench fetches by that same format's extension (fixtures/baseline.<ext>).
+      # A mismatch here means bench's fetch 404s against a key seed never created.
+      BENCH_INPUT_FORMAT: ${BENCH_INPUT_FORMAT:-jpg}
     networks: [bench]
     cpuset: "${INFRA_CPUSET:-8-15}"
     restart: "no"
@@ -115,6 +119,8 @@ services:
       BENCH_MIN_RUNS: ${BENCH_MIN_RUNS:-5}
       PROGRESS_ENABLED: ${PROGRESS_ENABLED:-true}
       READ_CALLBACK_DEBUG: ${READ_CALLBACK_DEBUG:-false}
+      BENCH_INPUT_FORMAT: ${BENCH_INPUT_FORMAT:-jpg}
+      BENCH_OUTPUT_FORMAT: ${BENCH_OUTPUT_FORMAT:-jpg}
       VIPS_CONCURRENCY: "1"   # the already-proven-optimal vips deployment model from earlier bash benchmarking
       RESULTS_DIR: /results
       RUN_ID: ${RUN_ID:-default}
