@@ -1,6 +1,7 @@
 package com.journi.bench.variant;
 
 import com.journi.bench.BenchConfig;
+import com.journi.bench.ImageFormat;
 import com.journi.bench.harness.JobResult;
 import com.journi.bench.metrics.RssSampler;
 import software.amazon.awssdk.core.sync.RequestBody;
@@ -13,6 +14,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -36,18 +38,23 @@ public final class GmStandardVariant implements Variant {
     private final Path iccPath;
     private final Path workDir;
     private final RssSampler rssSampler;
+    private final ImageFormat inputFormat;
+    private final ImageFormat outputFormat;
 
-    public GmStandardVariant(S3Client s3, String bucket, Path iccPath, Path workDir, RssSampler rssSampler) {
+    public GmStandardVariant(S3Client s3, String bucket, Path iccPath, Path workDir, RssSampler rssSampler,
+                              ImageFormat inputFormat, ImageFormat outputFormat) {
         this.s3 = s3;
         this.bucket = bucket;
         this.iccPath = iccPath;
         this.workDir = workDir;
         this.rssSampler = rssSampler;
+        this.inputFormat = inputFormat;
+        this.outputFormat = outputFormat;
     }
 
     @Override
     public String name() {
-        return "GM standard resize (fetch-then-process)";
+        return "GM standard resize (fetch-then-process) [" + inputFormat.ext + "->" + outputFormat.ext + "]";
     }
 
     /**
@@ -81,14 +88,14 @@ public final class GmStandardVariant implements Variant {
         try {
             long fetchStart = System.nanoTime();
             byte[] full = fetchFully(sourceKey);
-            inFile = ProcessRunner.tempFile(workDir, "gm-in-", ".jpg");
+            inFile = ProcessRunner.tempFile(workDir, "gm-in-", "." + inputFormat.ext);
             Files.write(inFile, full);
             long fetchEnd = System.nanoTime();
 
             long procStart = System.nanoTime();
             int[] srcDims = identifyDims(inFile);
             int[] target = areaFit(srcDims[0], srcDims[1], TARGET_PIXELS);
-            outFile = ProcessRunner.tempFile(workDir, "gm-out-", ".jpg");
+            outFile = ProcessRunner.tempFile(workDir, "gm-out-", "." + outputFormat.ext);
             ProcessRunner.run(gmCommand(inFile, outFile, target[0], target[1]), rssSampler, PROCESS_TIMEOUT_SECONDS);
             long procEnd = System.nanoTime();
 
@@ -152,15 +159,26 @@ public final class GmStandardVariant implements Variant {
     }
 
     private List<String> gmCommand(Path in, Path out, int w, int h) {
-        return List.of("gm", "convert", in.toString(),
+        List<String> cmd = new ArrayList<>(List.of("gm", "convert", in.toString(),
             "-auto-orient",
             "-profile", iccPath.toString(),
-            "-strip", "-colorspace", "RGB",
-            "-quality", "85", "-type", "truecolor",
-            "-background", "#ffffff", "-flatten",
+            "-strip", "-colorspace", "RGB"));
+        if (outputFormat.supportsQuality) {
+            cmd.addAll(List.of("-quality", "85"));
+        }
+        if (outputFormat.supportsAlpha) {
+            // Preserve any alpha channel the source has - PNG/WebP output can carry it.
+            cmd.addAll(List.of("-type", "truecolormatte"));
+        } else {
+            // JPEG has no alpha - composite onto white first, mirrors production's GM command
+            // (a no-op for opaque sources; only matters for alpha-channel input like PNG/WebP).
+            cmd.addAll(List.of("-type", "truecolor", "-background", "#ffffff", "-flatten"));
+        }
+        cmd.addAll(List.of(
             "-filter", "Bessel",
             "-resize", w + "x" + h + "!",
-            "jpg:" + out);
+            outputFormat.ext + ":" + out));
+        return cmd;
     }
 
     private static void deleteQuietly(Path p) {

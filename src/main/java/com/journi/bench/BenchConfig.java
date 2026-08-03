@@ -24,7 +24,11 @@ public record BenchConfig(
 
     String[] engines,       // gm, im, vips
     String[] ioModes,       // buffered, streamed (vips only)
-    String[] keys,          // S3 keys to seed/process
+    String[] keys,          // S3 key BASE NAMES to seed/process, no extension -
+                            // inputFormat.ext is appended (see Main.seed()/run())
+
+    ImageFormat inputFormat,  // BENCH_INPUT_FORMAT: jpg, png, or webp - which fixture gets fetched
+    ImageFormat outputFormat, // BENCH_OUTPUT_FORMAT: jpg, png, or webp - which format gets saved/uploaded
 
     String resultsDir,
     String runId
@@ -52,7 +56,10 @@ public record BenchConfig(
 
             str(env, "BENCH_ENGINES", "gm,im,vips").split(","),
             str(env, "BENCH_IO_MODES", "buffered,streamed").split(","),
-            str(env, "BENCH_KEYS", "fixtures/baseline.jpg,fixtures/progressive.jpg").split(","),
+            str(env, "BENCH_KEYS", "fixtures/baseline,fixtures/progressive").split(","),
+
+            ImageFormat.fromEnv(str(env, "BENCH_INPUT_FORMAT", "jpg")),
+            ImageFormat.fromEnv(str(env, "BENCH_OUTPUT_FORMAT", "jpg")),
 
             str(env, "RESULTS_DIR", "/results"),
             str(env, "RUN_ID", "default")

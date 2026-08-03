@@ -1,6 +1,7 @@
 package com.journi.bench.variant;
 
 import com.journi.bench.BenchConfig;
+import com.journi.bench.ImageFormat;
 import com.journi.bench.harness.JobResult;
 import com.journi.bench.metrics.RssSampler;
 import software.amazon.awssdk.core.sync.RequestBody;
@@ -13,6 +14,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -34,18 +36,23 @@ public final class ImBleedVariant implements Variant {
     private final Path iccPath;
     private final Path workDir;
     private final RssSampler rssSampler;
+    private final ImageFormat inputFormat;
+    private final ImageFormat outputFormat;
 
-    public ImBleedVariant(S3Client s3, String bucket, Path iccPath, Path workDir, RssSampler rssSampler) {
+    public ImBleedVariant(S3Client s3, String bucket, Path iccPath, Path workDir, RssSampler rssSampler,
+                           ImageFormat inputFormat, ImageFormat outputFormat) {
         this.s3 = s3;
         this.bucket = bucket;
         this.iccPath = iccPath;
         this.workDir = workDir;
         this.rssSampler = rssSampler;
+        this.inputFormat = inputFormat;
+        this.outputFormat = outputFormat;
     }
 
     @Override
     public String name() {
-        return "IM bleed resize (fetch-then-process)";
+        return "IM bleed resize (fetch-then-process) [" + inputFormat.ext + "->" + outputFormat.ext + "]";
     }
 
     /**
@@ -76,12 +83,12 @@ public final class ImBleedVariant implements Variant {
         try {
             long fetchStart = System.nanoTime();
             byte[] full = fetchFully(sourceKey);
-            inFile = ProcessRunner.tempFile(workDir, "im-in-", ".jpg");
+            inFile = ProcessRunner.tempFile(workDir, "im-in-", "." + inputFormat.ext);
             Files.write(inFile, full);
             long fetchEnd = System.nanoTime();
 
             long procStart = System.nanoTime();
-            outFile = ProcessRunner.tempFile(workDir, "im-out-", ".jpg");
+            outFile = ProcessRunner.tempFile(workDir, "im-out-", "." + outputFormat.ext);
             ProcessRunner.run(bleedCommand(inFile, outFile), rssSampler, PROCESS_TIMEOUT_SECONDS);
             long procEnd = System.nanoTime();
 
@@ -121,18 +128,33 @@ public final class ImBleedVariant implements Variant {
         // syntax and must NOT be doubled to "%%" (that would only be needed inside a
         // format string, which this isn't - single '%' is correct on the raw argv element).
         String viewport = "%[fx:w+" + (2 * BLEED_PX) + "]x%[fx:h+" + (2 * BLEED_PX) + "]-" + BLEED_PX + "-" + BLEED_PX;
-        return List.of("convert",
+        List<String> cmd = new ArrayList<>(List.of("convert",
             "-size", FULL_W + "x" + FULL_H, in.toString(),
             "-auto-orient",
             "-profile", iccPath.toString(),
-            "-strip", "-colorspace", "sRGB",
-            "-quality", "85", "-alpha", "remove", "-type", "truecolor",
+            "-strip", "-colorspace", "sRGB"));
+        if (outputFormat.supportsQuality) {
+            cmd.addAll(List.of("-quality", "85"));
+        }
+        if (outputFormat.supportsAlpha) {
+            // Preserve alpha - "-background none" is required so the later -extent (which fills
+            // the bleed border) fills with transparent rather than opaque, which would otherwise
+            // silently flatten the whole canvas (verified: without this, output has no alpha
+            // channel at all even with -type truecolormatte set).
+            cmd.addAll(List.of("-type", "truecolormatte", "-background", "none"));
+        } else {
+            // JPEG has no alpha - composite onto white first, mirrors production's IM command
+            // (a no-op for opaque sources; only matters for alpha-channel input like PNG/WebP).
+            cmd.addAll(List.of("-alpha", "remove", "-type", "truecolor", "-background", "white"));
+        }
+        cmd.addAll(List.of(
             "-resize", CONTENT_W + "x" + CONTENT_H + "^",
             "-virtual-pixel", "Mirror",
             "-set", "option:distort:viewport", viewport,
             "-distort", "SRT", "0",
             "-gravity", "center", "-extent", FULL_W + "x" + FULL_H,
-            "jpg:" + out);
+            outputFormat.ext + ":" + out));
+        return cmd;
     }
 
     private static void deleteQuietly(Path p) {
