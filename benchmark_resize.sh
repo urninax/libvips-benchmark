@@ -36,19 +36,20 @@ and compress very differently from real photographic content and will
 bias the comparison.
 
 Install missing tools on macOS:
-  brew install graphicsmagick imagemagick vips hyperfine
+  brew install graphicsmagick imagemagick vips python3 hyperfine
 EOF
   exit 1
 fi
 
 mkdir -p "$OUT_DIR"/{gm,im,vips}
+export OMP_NUM_THREADS=1
+export VIPS_CONCURRENCY=1
 
-for bin in gm convert vips vipsthumbnail hyperfine; do
+for bin in gm convert vips python3 hyperfine; do
   command -v "$bin" >/dev/null 2>&1 || { echo "Missing required binary: $bin (see install hint above)" >&2; exit 1; }
 done
 
-# sRGB.icc profile path as referenced by ProcessorUtils.colorProfile - run
-# this script from the repo root so the relative path resolves, or edit it.
+# sRGB.icc profile path as referenced by ProcessorUtils.colorProfile
 ICC="conf/imagemagick/sRGB.icc"
 if [[ ! -f "$ICC" ]]; then
   echo "WARNING: $ICC not found relative to cwd ($PWD)." >&2
@@ -63,7 +64,6 @@ echo
 # ---- aspect-preserving helpers, computed ONCE so both tools get an identical
 #      forced target (avoids relying on each tool's own fit heuristics) -----
 
-# mirrors GM's Area/'@' resize mode: scale to fit a total pixel budget
 area_fit() {
   local target_px=$1
   awk -v w="$SRC_W" -v h="$SRC_H" -v px="$target_px" 'BEGIN {
@@ -73,7 +73,6 @@ area_fit() {
   }'
 }
 
-# mirrors GM's Min/'^>' resize mode: scale so the image covers at least WxH
 min_fit() {
   local tw=$1 th=$2
   awk -v w="$SRC_W" -v h="$SRC_H" -v tw="$tw" -v th="$th" 'BEGIN {
@@ -86,6 +85,11 @@ min_fit() {
 THUMB=$(min_fit 320 320)          # PictureFormat.mobFormat        (320x320, SizeMode.Min)
 FULL=$(area_fit 2250000)          # PictureFormat.mobileFullFormat (1500x1500 -> 2 MegaPixel cap)
 ORIG=$(area_fit 16777216)         # PictureFormat.originalFormat   (4096x4096 -> 16 MegaPixel cap)
+
+# Split WxH dimensions for modern 'vips thumbnail' CLI arguments
+THUMB_W="${THUMB%%x*}"; THUMB_H="${THUMB##*x}"
+FULL_W="${FULL%%x*}";   FULL_H="${FULL##*x}"
+ORIG_W="${ORIG%%x*}";   ORIG_H="${ORIG##*x}"
 
 echo "Computed targets — thumb:${THUMB}  mobileFull:${FULL}  original:${ORIG}"
 echo
@@ -114,25 +118,25 @@ hyperfine \
   --export-markdown "$OUT_DIR/standard_resize.md" \
   --export-json "$OUT_DIR/standard_resize.json" \
   -n "GM   thumb ${THUMB} (jpg q85)" \
-    "gm convert -size ${THUMB} '$SRC' -auto-orient -profile '$ICC' -strip -colorspace RGB -quality 85 -type truecolor -background '#ffffff' -flatten -filter Bessel -resize '${THUMB}!' 'jpg:$OUT_DIR/gm/thumb.jpg'" \
+    "gm convert -size ${THUMB} '$SRC' -auto-orient -profile '$ICC' -strip -colorspace RGB -quality 85 -type truecolor -background '#ffffff' -flatten -filter Lanczos -resize '${THUMB}!' 'jpg:$OUT_DIR/gm/thumb.jpg'" \
   -n "vips thumb ${THUMB} (jpg q85)" \
-    "vipsthumbnail '$SRC' --size '${THUMB}!' -o '$OUT_DIR/vips/thumb.jpg[Q=85,strip]'" \
+    "vips thumbnail '$SRC' '$OUT_DIR/vips/thumb.jpg[Q=85,strip]' $THUMB_W --height $THUMB_H --size force --export-profile '$ICC'" \
   -n "GM   mobileFull ${FULL} (jpg q85)" \
-    "gm convert -size ${FULL} '$SRC' -auto-orient -profile '$ICC' -strip -colorspace RGB -quality 85 -type truecolor -background '#ffffff' -flatten -filter Bessel -resize '${FULL}!' 'jpg:$OUT_DIR/gm/full.jpg'" \
+    "gm convert -size ${FULL} '$SRC' -auto-orient -profile '$ICC' -strip -colorspace RGB -quality 85 -type truecolor -background '#ffffff' -flatten -filter Lanczos -resize '${FULL}!' 'jpg:$OUT_DIR/gm/full.jpg'" \
   -n "vips mobileFull ${FULL} (jpg q85)" \
-    "vipsthumbnail '$SRC' --size '${FULL}!' -o '$OUT_DIR/vips/full.jpg[Q=85,strip]'" \
+    "vips thumbnail '$SRC' '$OUT_DIR/vips/full.jpg[Q=85,strip]' $FULL_W --height $FULL_H --size force --export-profile '$ICC'" \
   -n "GM   mobileFullWebp ${FULL} (webp q85)" \
-    "gm convert -size ${FULL} '$SRC' -auto-orient -profile '$ICC' -strip -colorspace RGB -quality 85 -background none -filter Bessel -resize '${FULL}!' 'webp:$OUT_DIR/gm/full.webp'" \
+    "gm convert -size ${FULL} '$SRC' -auto-orient -profile '$ICC' -strip -colorspace RGB -quality 85 -background none -filter Lanczos -resize '${FULL}!' 'webp:$OUT_DIR/gm/full.webp'" \
   -n "vips mobileFullWebp ${FULL} (webp q85)" \
-    "vipsthumbnail '$SRC' --size '${FULL}!' -o '$OUT_DIR/vips/full.webp[Q=85,strip]'" \
+    "vips thumbnail '$SRC' '$OUT_DIR/vips/full.webp[Q=85,strip]' $FULL_W --height $FULL_H --size force --export-profile '$ICC'" \
   -n "GM   mobileFullPng ${FULL} (png)" \
-    "gm convert -size ${FULL} '$SRC' -auto-orient -profile '$ICC' -strip -colorspace RGB -define png:filter-type=6 -background none -filter Bessel -resize '${FULL}!' 'png:$OUT_DIR/gm/full.png'" \
+    "gm convert -size ${FULL} '$SRC' -auto-orient -profile '$ICC' -strip -colorspace RGB -define png:filter-type=6 -background none -filter Lanczos -resize '${FULL}!' 'png:$OUT_DIR/gm/full.png'" \
   -n "vips mobileFullPng ${FULL} (png)" \
-    "vipsthumbnail '$SRC' --size '${FULL}!' -o '$OUT_DIR/vips/full.png[strip]'" \
+    "vips thumbnail '$SRC' '$OUT_DIR/vips/full.png[strip]' $FULL_W --height $FULL_H --size force --export-profile '$ICC'" \
   -n "GM   original ${ORIG} (jpg q85, keepExif)" \
-    "gm convert -size ${SRC_W}x${SRC_H} '$SRC' -colorspace RGB -quality 85 -type truecolor -background '#ffffff' -flatten -filter Bessel -resize '${ORIG}!' 'jpg:$OUT_DIR/gm/orig.jpg'" \
+    "gm convert -size ${SRC_W}x${SRC_H} '$SRC' -colorspace RGB -quality 85 -type truecolor -background '#ffffff' -flatten -filter Lanczos -resize '${ORIG}!' 'jpg:$OUT_DIR/gm/orig.jpg'" \
   -n "vips original ${ORIG} (jpg q85, keepExif)" \
-    "vipsthumbnail '$SRC' --size '${ORIG}!' --no-rotate -o '$OUT_DIR/vips/orig.jpg[Q=85]'"
+    "vips thumbnail '$SRC' '$OUT_DIR/vips/orig.jpg[Q=85]' $ORIG_W --height $ORIG_H --size force --no-rotate"
 
 echo
 echo "== Standard resize results written to $OUT_DIR/standard_resize.md =="
@@ -140,30 +144,25 @@ echo
 
 # ============================================================================
 # PART 2 — Bleed / mirror-extend resize: ImageMagick vs libvips
-#   Only bleed formats (photobook/print pages, covers) go through IM.
-#   Scenario: A4 page at 300 DPI (2480x3508 content) with the project's
-#   DEFAULT_BLEED = 3mm on all sides.
-#     TARGET_DPI = 300, PPINCH = 72  => DPP = 300/72 = 4.1667 px/pt
-#     3mm bleed = 3 * 2.8346 pt = 8.5038 pt => ceil(4.1667 * 8.5038) = 36 px
 # ============================================================================
 
 BLEED_PX=36
 CONTENT_W=2480
 CONTENT_H=3508
-FULL_W=$((CONTENT_W + 2 * BLEED_PX))   # bleed on left+right
-FULL_H=$((CONTENT_H + 2 * BLEED_PX))   # bleed on top+bottom
+BLEED_FULL_W=$((ORIG_W + 2 * BLEED_PX))   # bleed on left+right
+BLEED_FULL_H=$((ORIG_H + 2 * BLEED_PX))   # bleed on top+bottom
 
-echo "Bleed case — content ${CONTENT_W}x${CONTENT_H}, bleed ${BLEED_PX}px/edge, full canvas ${FULL_W}x${FULL_H}"
+echo "Bleed case — content ${ORIG_W}x${ORIG_H}, bleed ${BLEED_PX}px/edge, full canvas ${BLEED_FULL_W}x${BLEED_FULL_H}"
 echo
 
 hyperfine \
   --warmup 3 --min-runs 20 \
   --export-markdown "$OUT_DIR/bleed_resize.md" \
   --export-json "$OUT_DIR/bleed_resize.json" \
-  -n "IM   bleed page ${FULL_W}x${FULL_H} (jpg q85, mirror-extend ${BLEED_PX}px)" \
-    "convert -size ${FULL_W}x${FULL_H} '$SRC' -auto-orient -profile '$ICC' -strip -colorspace sRGB -quality 85 -alpha remove -type truecolor -resize '${CONTENT_W}x${CONTENT_H}^' -virtual-pixel Mirror -set option:distort:viewport '%[fx:w+$((2*BLEED_PX))]x%[fx:h+$((2*BLEED_PX))]-${BLEED_PX}-${BLEED_PX}' -distort SRT 0 -gravity center -extent ${FULL_W}x${FULL_H} 'jpg:$OUT_DIR/im/bleed.jpg'" \
-  -n "vips bleed page ${FULL_W}x${FULL_H} (jpg q85, mirror-extend ${BLEED_PX}px)" \
-    "vipsthumbnail '$SRC' --size '${CONTENT_W}x${CONTENT_H}' --smartcrop centre -o '$OUT_DIR/vips/bleed_cropped.jpg[Q=85,strip]' && vips embed '$OUT_DIR/vips/bleed_cropped.jpg' '$OUT_DIR/vips/bleed.jpg[Q=85]' ${BLEED_PX} ${BLEED_PX} ${FULL_W} ${FULL_H} --extend mirror"
+  -n "IM   bleed page ${BLEED_FULL_W}x${BLEED_FULL_H} (jpg q85, mirror-extend ${BLEED_PX}px)" \
+    "convert -size ${BLEED_FULL_W}x${BLEED_FULL_H} '$SRC' -auto-orient -profile '$ICC' -strip -colorspace sRGB -quality 85 -alpha remove -type truecolor -resize '${CONTENT_W}x${CONTENT_H}^' -virtual-pixel Mirror -set option:distort:viewport '%[fx:w+$((2*BLEED_PX))]x%[fx:h+$((2*BLEED_PX))]-${BLEED_PX}-${BLEED_PX}' -distort SRT 0 -gravity center -extent ${BLEED_FULL_W}x${BLEED_FULL_H} 'jpg:$OUT_DIR/im/bleed.jpg'" \
+  -n "vips bleed page ${BLEED_FULL_W}x${BLEED_FULL_H} (jpg q85, mirror-extend ${BLEED_PX}px)" \
+    "python3 -c \"import pyvips; img = pyvips.Image.thumbnail('$SRC', $ORIG_W, height=$ORIG_H, crop='centre', export_profile='$ICC'); img = img.embed($BLEED_PX, $BLEED_PX, $BLEED_FULL_W, $BLEED_FULL_H, extend='mirror'); img.write_to_file('$OUT_DIR/vips/bleed.jpg[Q=85,strip]')\""
 
 echo
 echo "== Bleed resize results written to $OUT_DIR/bleed_resize.md =="
