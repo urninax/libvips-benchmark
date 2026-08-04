@@ -93,6 +93,20 @@ echo
 # ============================================================================
 # PART 1 — Standard (non-bleed) resize: GraphicsMagick vs libvips
 #   This project uses GM (not IM) for every non-bleed resize.
+#
+# `-size <target>` BEFORE the source path on every GM downscale command below
+# is a libjpeg read-time hint (DCT-domain scaled decompression, 1/1-1/8) -
+# WITHOUT it, GM always fully decodes the source at its real resolution before
+# discarding most of it during resize, while `vipsthumbnail` always gets the
+# equivalent shrink-on-load for free. Verified empirically: adding this hint
+# took a 2268x4032 JPEG thumb resize from ~0.16s to ~0.04s (byte-identical
+# output dimensions) on this repo's own baseline.jpg fixture. Without it, this
+# benchmark doesn't answer "is vips' resize faster" so much as "does this
+# script know about a decode shortcut GM has and vips gets automatically" -
+# the gap it produces grows with SOURCE resolution rather than reflecting a
+# real, resolution-independent algorithmic difference. Confirmed harmless for
+# the PNG case (GM has no equivalent scaled-decode path for PNG, so the hint
+# is a no-op there - byte-identical output verified).
 # ============================================================================
 
 hyperfine \
@@ -100,19 +114,19 @@ hyperfine \
   --export-markdown "$OUT_DIR/standard_resize.md" \
   --export-json "$OUT_DIR/standard_resize.json" \
   -n "GM   thumb ${THUMB} (jpg q85)" \
-    "gm convert '$SRC' -auto-orient -profile '$ICC' -strip -colorspace RGB -quality 85 -type truecolor -background '#ffffff' -flatten -filter Bessel -resize '${THUMB}!' 'jpg:$OUT_DIR/gm/thumb.jpg'" \
+    "gm convert -size ${THUMB} '$SRC' -auto-orient -profile '$ICC' -strip -colorspace RGB -quality 85 -type truecolor -background '#ffffff' -flatten -filter Bessel -resize '${THUMB}!' 'jpg:$OUT_DIR/gm/thumb.jpg'" \
   -n "vips thumb ${THUMB} (jpg q85)" \
     "vipsthumbnail '$SRC' --size '${THUMB}!' -o '$OUT_DIR/vips/thumb.jpg[Q=85,strip]'" \
   -n "GM   mobileFull ${FULL} (jpg q85)" \
-    "gm convert '$SRC' -auto-orient -profile '$ICC' -strip -colorspace RGB -quality 85 -type truecolor -background '#ffffff' -flatten -filter Bessel -resize '${FULL}!' 'jpg:$OUT_DIR/gm/full.jpg'" \
+    "gm convert -size ${FULL} '$SRC' -auto-orient -profile '$ICC' -strip -colorspace RGB -quality 85 -type truecolor -background '#ffffff' -flatten -filter Bessel -resize '${FULL}!' 'jpg:$OUT_DIR/gm/full.jpg'" \
   -n "vips mobileFull ${FULL} (jpg q85)" \
     "vipsthumbnail '$SRC' --size '${FULL}!' -o '$OUT_DIR/vips/full.jpg[Q=85,strip]'" \
   -n "GM   mobileFullWebp ${FULL} (webp q85)" \
-    "gm convert '$SRC' -auto-orient -profile '$ICC' -strip -colorspace RGB -quality 85 -background none -filter Bessel -resize '${FULL}!' 'webp:$OUT_DIR/gm/full.webp'" \
+    "gm convert -size ${FULL} '$SRC' -auto-orient -profile '$ICC' -strip -colorspace RGB -quality 85 -background none -filter Bessel -resize '${FULL}!' 'webp:$OUT_DIR/gm/full.webp'" \
   -n "vips mobileFullWebp ${FULL} (webp q85)" \
     "vipsthumbnail '$SRC' --size '${FULL}!' -o '$OUT_DIR/vips/full.webp[Q=85,strip]'" \
   -n "GM   mobileFullPng ${FULL} (png)" \
-    "gm convert '$SRC' -auto-orient -profile '$ICC' -strip -colorspace RGB -define png:filter-type=6 -background none -filter Bessel -resize '${FULL}!' 'png:$OUT_DIR/gm/full.png'" \
+    "gm convert -size ${FULL} '$SRC' -auto-orient -profile '$ICC' -strip -colorspace RGB -define png:filter-type=6 -background none -filter Bessel -resize '${FULL}!' 'png:$OUT_DIR/gm/full.png'" \
   -n "vips mobileFullPng ${FULL} (png)" \
     "vipsthumbnail '$SRC' --size '${FULL}!' -o '$OUT_DIR/vips/full.png[strip]'" \
   -n "GM   original ${ORIG} (jpg q85, keepExif)" \
