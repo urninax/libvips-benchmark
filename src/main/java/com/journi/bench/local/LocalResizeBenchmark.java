@@ -308,6 +308,9 @@ public final class LocalResizeBenchmark {
         List<HyperfineExport.CaseResult> all = new ArrayList<>(standardResults);
         all.addAll(bleedResults);
         printValidityGates(all);
+
+        System.out.println();
+        System.out.println("Charts:  python3 tools/plot_benchmarks.py " + formatDir);
     }
 
     // ---- measurement -------------------------------------------------------

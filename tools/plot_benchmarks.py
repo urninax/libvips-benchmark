@@ -1,0 +1,401 @@
+#!/usr/bin/env python3
+"""
+Render benchmark result JSON into charts.
+
+Reads the JSON exported by EITHER harness and derives everything from the data -
+no hardcoded numbers, so a chart can never silently drift from the run it claims
+to show:
+
+  * bench.jar local-resize   -> standard_resize_ffm.json / bleed_resize_ffm.json
+                                (strict JSON, carries engine/rss/output_bytes)
+  * benchmark_resize.sh      -> standard_resize.json / bleed_resize.json
+                                (hyperfine's export; the script prepends the source
+                                 filename + blank line, so it is NOT strict JSON -
+                                 handled below)
+
+Charts are only emitted when the underlying metric is actually present and
+actually decision-relevant:
+
+  <stem>_time.png            per-operation wall time, baseline engine vs libvips
+  combined_time.png          all operations in one figure (only if >1 input file)
+  rss.png                    peak RSS per operation (skipped when not measured,
+                             e.g. any run on macOS - RssSampler needs /proc)
+  vips_startup_overhead.png  libvips in-process vs the same op through the CLI
+                             (only when a run included the `vipscli` engine)
+
+Deliberately NOT charted: stddev/MAD (already drawn as error bars), warmup times
+and exit codes (diagnostics), and output file sizes - the last is a *validity
+gate*, not a metric, and is surfaced as a hatched bar + footnote instead.
+
+Usage:
+  ./tools/plot_benchmarks.py results-ffm/jpg
+  ./tools/plot_benchmarks.py results-ffm/jpg/standard_resize_ffm.json -o /tmp/charts
+"""
+
+import argparse
+import json
+import re
+import sys
+from collections import OrderedDict
+from pathlib import Path
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.patches as mpatches
+import matplotlib.pyplot as plt
+import numpy as np
+
+try:
+    plt.style.use("seaborn-v0_8-whitegrid")
+except OSError:
+    plt.style.use("ggplot")
+plt.rcParams["font.sans-serif"] = "DejaVu Sans"
+plt.rcParams["axes.edgecolor"] = "#cccccc"
+plt.rcParams["axes.linewidth"] = 0.8
+
+COLOR_GM = "#2b5c8f"       # GraphicsMagick
+COLOR_IM = "#7b4397"       # ImageMagick
+COLOR_VIPS = "#e05d44"     # libvips, in-process
+COLOR_VIPS_CLI = "#f0a08c" # libvips, forked CLI
+
+# Order matters: 'vips-ffm'/'vips-cli' must be tried before the bare 'vips'.
+# NB the bare `vips` rows come from benchmark_resize.sh, where they ARE the CLI -
+# labelling them "in-process" would be a lie, hence the separate display names.
+ENGINES = [
+    ("vips-ffm", "vips", "libvips (in-process, vips-ffm)", COLOR_VIPS),
+    ("vips-cli", "vipscli", "libvips (CLI subprocess)", COLOR_VIPS_CLI),
+    ("vips", "vipscli", "libvips (CLI subprocess)", COLOR_VIPS_CLI),
+    ("GM", "gm", "GraphicsMagick (CLI subprocess)", COLOR_GM),
+    ("IM", "im", "ImageMagick (CLI subprocess)", COLOR_IM),
+]
+BASELINE_ENGINES = ("gm", "im")            # what libvips is being compared AGAINST
+LIBVIPS_ENGINES = ("vips", "vipscli")      # prefer in-process; fall back to CLI rows
+SUBPROCESS_ENGINES = ("gm", "im", "vipscli")  # engines whose memory lands in a CHILD process
+
+DISPLAY = {k: (label, color) for _, k, label, color in ENGINES}
+DISPLAY["vips"] = ("libvips (in-process, vips-ffm)", COLOR_VIPS)
+
+
+def load_results(path: Path):
+    """Returns (source_label, [row, ...]). Tolerates the non-strict JSON that
+    benchmark_resize.sh produces by prepending the source filename."""
+    text = path.read_text()
+    brace = text.find("{")
+    if brace < 0:
+        raise ValueError(f"{path}: no JSON object found")
+    prefix = text[:brace].strip()
+    data = json.loads(text[brace:])
+    source = data.get("source") or prefix or path.stem
+
+    rows = []
+    for r in data.get("results", []):
+        command = r["command"]
+        engine = r.get("engine")
+        operation = command
+        for token, key, _, _ in ENGINES:
+            m = re.match(rf"^{re.escape(token)}\s+", command)
+            if m:
+                engine = engine or key
+                operation = command[m.end():]
+                break
+        rows.append({
+            "command": command,
+            "engine": engine or "unknown",
+            "operation": operation.strip(),
+            "mean": r["mean"],
+            "stddev": r.get("stddev") or 0.0,
+            "rss_self_kb": r.get("rss_self_kb", -1),
+            "rss_children_kb": r.get("rss_children_kb", -1),
+            "output_bytes": r.get("output_bytes", -1),
+        })
+    return source, rows
+
+
+def group_by_operation(rows):
+    """operation -> {engine: row}, preserving first-seen operation order."""
+    grouped = OrderedDict()
+    for r in rows:
+        grouped.setdefault(r["operation"], {})[r["engine"]] = r
+    return grouped
+
+
+def pick(by_engine, keys):
+    for k in keys:
+        if k in by_engine:
+            return k, by_engine[k]
+    return None, None
+
+
+def attributable_rss_mb(row):
+    """The peak RSS that actually belongs to this engine.
+
+    rssSelf and rssChildren are DIFFERENT QUANTITIES and must never be summed: a
+    forked gm/convert's memory lands in children while the JVM merely waits, and
+    in-process libvips' memory lands in self while there are no children at all.
+    So take the one that is meaningful for the engine, not a total."""
+    kb = row["rss_children_kb"] if row["engine"] in SUBPROCESS_ENGINES else row["rss_self_kb"]
+    return kb / 1024.0 if kb is not None and kb >= 0 else None
+
+
+def short_label(operation):
+    """'mobileFull 1125x2000 (jpg q85)' -> 'mobileFull (jpg)\\n1125x2000'.
+
+    The full command strings are far too long to sit side by side on an axis; keep
+    the operation name, its output dimensions, and the format when the name doesn't
+    already carry it."""
+    m = re.match(r"^(.*?)\s+(\d+x\d+)(?:\s*\((.*)\))?", operation)
+    if not m:
+        return operation
+    name, dims, paren = m.group(1), m.group(2), (m.group(3) or "")
+    fmt = next((f for f in ("jpg", "png", "webp") if re.search(rf"\b{f}\b", paren)), None)
+    if fmt and fmt not in name.lower():
+        name = f"{name} ({fmt})"
+    return f"{name}\n{dims}"
+
+
+def apply_scale(ax, values, base_ylabel):
+    """A run spanning e.g. 0.05s to 2.2s is unreadable on a linear axis - the fast bars
+    collapse to nothing. Switch to log only when the spread actually demands it, and say
+    so on the axis so nobody misreads bar heights as proportional."""
+    positive = [v for v in values if v > 0]
+    if positive and max(positive) / min(positive) > 20:
+        ax.set_yscale("log")
+        ax.set_ylim(min(positive) * 0.45, max(positive) * 2.6)
+        ax.set_ylabel(base_ylabel + " — LOG SCALE", fontsize=11, fontweight="bold")
+        return True
+    ax.set_ylim(0, max(values) * 1.18)
+    ax.set_ylabel(base_ylabel, fontsize=11, fontweight="bold")
+    return False
+
+
+def footnote(fig, text, lines):
+    """tight_layout() ignores fig.text, so reserve the strip explicitly or the note
+    lands on top of the x tick labels."""
+    fig.tight_layout(rect=[0, 0.035 * lines + 0.02, 1, 1])
+    fig.text(0.01, 0.008, text, fontsize=8, style="italic", color="#555555")
+
+
+def annotate_bars(ax, rects, unit="s", font_size=8.5):
+    for rect in rects:
+        h = rect.get_height()
+        if h <= 0:
+            continue
+        text = f"{h:.3f}{unit}" if unit == "s" else f"{h:.0f}{unit}"
+        ax.annotate(text, xy=(rect.get_x() + rect.get_width() / 2, h),
+                    xytext=(0, 4), textcoords="offset points",
+                    ha="center", va="bottom", fontsize=font_size, fontweight="bold")
+
+
+def size_mismatch(a, b, tolerance=0.10):
+    """True when the two engines' outputs differ enough that encoder settings are
+    not comparable - the row is then measuring whose default compression effort is
+    lower, not which library is faster."""
+    if not a or not b or a["output_bytes"] < 0 or b["output_bytes"] < 0 or a["output_bytes"] == 0:
+        return False
+    return abs(b["output_bytes"] - a["output_bytes"]) / a["output_bytes"] > tolerance
+
+
+def time_chart(grouped, source, title, out_path):
+    ops, base_rows, vips_rows, vips_keys = [], [], [], set()
+    for op, by_engine in grouped.items():
+        _, base = pick(by_engine, BASELINE_ENGINES)
+        vkey, vips = pick(by_engine, LIBVIPS_ENGINES)
+        if base is None or vips is None:
+            continue
+        ops.append(op)
+        base_rows.append(base)
+        vips_rows.append(vips)
+        vips_keys.add(vkey)
+    if not ops:
+        return None
+
+    flagged = [size_mismatch(b, v) for b, v in zip(base_rows, vips_rows)]
+    labels = []
+    for op, b, v, flag in zip(ops, base_rows, vips_rows, flagged):
+        ratio = b["mean"] / v["mean"] if v["mean"] else 0
+        # "0.54x faster" is nonsense - say slower when it is slower.
+        verdict = f"{ratio:.2f}x faster" if ratio >= 1 else f"{1 / ratio:.2f}x SLOWER" if ratio else "n/a"
+        labels.append(f"{short_label(op)}\n{verdict}" + (" *" if flag else ""))
+
+    x = np.arange(len(ops))
+    width = 0.35
+    fig, ax = plt.subplots(figsize=(max(7, 1.85 * len(ops)), 6.3), dpi=200)
+
+    base_colors = [DISPLAY.get(r["engine"], ("", COLOR_GM))[1] for r in base_rows]
+    r1 = ax.bar(x - width / 2, [r["mean"] for r in base_rows], width,
+                yerr=[r["stddev"] for r in base_rows], color=base_colors,
+                capsize=4, edgecolor="black", linewidth=0.5)
+    vips_colors = [DISPLAY.get(r["engine"], ("", COLOR_VIPS))[1] for r in vips_rows]
+    r2 = ax.bar(x + width / 2, [r["mean"] for r in vips_rows], width,
+                yerr=[r["stddev"] for r in vips_rows], color=vips_colors,
+                capsize=4, edgecolor="black", linewidth=0.5)
+    for bar, flag in zip(list(r1) + list(r2), flagged + flagged):
+        if flag:
+            bar.set_hatch("//")
+
+    ax.set_title(f"{title}\nSource: {source}", fontsize=13, fontweight="bold", pad=14)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=9)
+    apply_scale(ax, [r["mean"] for r in base_rows + vips_rows],
+                "Mean wall time (seconds, lower is better)")
+    annotate_bars(ax, r1)
+    annotate_bars(ax, r2)
+
+    engines_present = {r["engine"] for r in base_rows} | vips_keys
+    ax.legend(handles=[mpatches.Patch(facecolor=DISPLAY[e][1], label=DISPLAY[e][0],
+                                      edgecolor="black", linewidth=0.5)
+                       for e in ("gm", "im", "vips", "vipscli") if e in engines_present],
+              fontsize=10, frameon=True, facecolor="white", edgecolor="none")
+
+    if any(flagged):
+        footnote(fig, "* output sizes differ >10% between engines — encoder settings are not "
+                      "comparable for this operation; treat its speedup as unvalidated.", 1)
+    else:
+        fig.tight_layout()
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+    return out_path
+
+
+def rss_chart(grouped, source, out_path):
+    ops, base_vals, vips_vals, base_colors = [], [], [], []
+    for op, by_engine in grouped.items():
+        _, base = pick(by_engine, BASELINE_ENGINES)
+        _, vips = pick(by_engine, LIBVIPS_ENGINES)
+        if base is None or vips is None:
+            continue
+        b_mb, v_mb = attributable_rss_mb(base), attributable_rss_mb(vips)
+        if b_mb is None or v_mb is None:
+            continue
+        ops.append(op)
+        base_vals.append(b_mb)
+        vips_vals.append(v_mb)
+        base_colors.append(DISPLAY.get(base["engine"], ("", COLOR_GM))[1])
+    if not ops:
+        return None  # not measured (no /proc) - emit nothing rather than a chart of zeros
+
+    x = np.arange(len(ops))
+    width = 0.35
+    fig, ax = plt.subplots(figsize=(max(7, 1.85 * len(ops)), 6.3), dpi=200)
+    r1 = ax.bar(x - width / 2, base_vals, width, color=base_colors,
+                capsize=4, edgecolor="black", linewidth=0.5)
+    r2 = ax.bar(x + width / 2, vips_vals, width, color=COLOR_VIPS,
+                capsize=4, edgecolor="black", linewidth=0.5)
+
+    ax.set_title(f"Peak memory per operation\nSource: {source}", fontsize=13, fontweight="bold", pad=14)
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"{short_label(op)}\n{b / v:.2f}x less" if v else short_label(op)
+                        for op, b, v in zip(ops, base_vals, vips_vals)], fontsize=9)
+    apply_scale(ax, base_vals + vips_vals, "Peak RSS attributable to the engine (MB)")
+    annotate_bars(ax, r1, unit="MB")
+    annotate_bars(ax, r2, unit="MB")
+    ax.legend(handles=[mpatches.Patch(facecolor=c, label=l, edgecolor="black", linewidth=0.5)
+                       for c, l in [(COLOR_GM, "GM/IM: peak RSS of the forked child process"),
+                                    (COLOR_VIPS, "libvips: peak RSS added inside the JVM")]],
+              fontsize=9, frameon=True, facecolor="white", edgecolor="none")
+    footnote(fig, "Two different quantities, deliberately not summed: the subprocess engines' memory "
+                  "is their child's RSS,\nwhile in-process libvips' is growth in the JVM's own RSS over "
+                  "a pre-case baseline. Sampled every 5ms.", 2)
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+    return out_path
+
+
+def startup_chart(grouped, source, out_path):
+    """The reason this whole in-process harness exists: how much of the `vips` CLI's
+    time is process startup rather than image work."""
+    ops, ffm, cli = [], [], []
+    for op, by_engine in grouped.items():
+        if "vips" in by_engine and "vipscli" in by_engine:
+            ops.append(op)
+            ffm.append(by_engine["vips"]["mean"])
+            cli.append(by_engine["vipscli"]["mean"])
+    if not ops:
+        return None
+
+    x = np.arange(len(ops))
+    width = 0.35
+    fig, ax = plt.subplots(figsize=(max(8, 2.6 * len(ops)), 5.8), dpi=200)
+    r1 = ax.bar(x - width / 2, cli, width, color=COLOR_VIPS_CLI,
+                edgecolor="black", linewidth=0.5, label="libvips via CLI (forked per image)")
+    r2 = ax.bar(x + width / 2, ffm, width, color=COLOR_VIPS,
+                edgecolor="black", linewidth=0.5, label="libvips in-process (vips-ffm)")
+    annotate_bars(ax, r1)
+    annotate_bars(ax, r2)
+
+    for xi, (c, f) in enumerate(zip(cli, ffm)):
+        ax.annotate(f"+{(c - f) * 1000:.0f} ms", xy=(xi, max(c, f)), xytext=(0, 22),
+                    textcoords="offset points", ha="center", fontsize=9,
+                    fontweight="bold", color="#8a3324")
+
+    ax.set_ylabel("Mean wall time (seconds)", fontsize=11, fontweight="bold")
+    ax.set_title(f"Cost of shelling out to the vips CLI\nSource: {source}",
+                 fontsize=13, fontweight="bold", pad=14)
+    ax.set_xticks(x)
+    ax.set_xticklabels([short_label(o) for o in ops], fontsize=9)
+    ax.set_ylim(0, max(cli + ffm) * 1.30)
+    ax.legend(fontsize=10, frameon=True, facecolor="white", edgecolor="none")
+    footnote(fig, "Same libvips, same operation — the delta is process startup (exec + libvips/glib/"
+                  "plugin loading).\nIt is near-constant regardless of image size, and production pays "
+                  "it once at boot, not per image.", 2)
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+    return out_path
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Render benchmark JSON into charts.")
+    ap.add_argument("inputs", nargs="+", type=Path,
+                    help="result .json files, or a directory containing them")
+    ap.add_argument("-o", "--out-dir", type=Path, default=None,
+                    help="where to write PNGs (default: <first input dir>/charts)")
+    args = ap.parse_args()
+
+    files = []
+    for p in args.inputs:
+        if p.is_dir():
+            files.extend(sorted(f for f in p.glob("*resize*.json")))
+        elif p.is_file():
+            files.append(p)
+        else:
+            print(f"skipping (not found): {p}", file=sys.stderr)
+    if not files:
+        print("No result JSON found.", file=sys.stderr)
+        return 1
+
+    out_dir = args.out_dir or (files[0].parent / "charts")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    all_rows, source, written = [], None, []
+    for f in files:
+        src, rows = load_results(f)
+        source = source or src
+        all_rows.extend(rows)
+        title = f.stem.replace("_ffm", "").replace("_", " ").title()
+        p = time_chart(group_by_operation(rows), src, title, out_dir / f"{f.stem}_time.png")
+        if p:
+            written.append(p)
+
+    combined = group_by_operation(all_rows)
+    if len(files) > 1:
+        p = time_chart(combined, source, "All operations", out_dir / "combined_time.png")
+        if p:
+            written.append(p)
+    for p in (rss_chart(combined, source, out_dir / "rss.png"),
+              startup_chart(combined, source, out_dir / "vips_startup_overhead.png")):
+        if p:
+            written.append(p)
+
+    for p in written:
+        print(f"wrote {p}")
+    if not any(p.name == "rss.png" for p in written):
+        print("skipped rss.png — no RSS in the input (RssSampler needs /proc; "
+              "run in the Linux container to get memory numbers)")
+    if not any(p.name == "vips_startup_overhead.png" for p in written):
+        print("skipped vips_startup_overhead.png — no vips-cli rows "
+              "(re-run with BENCH_ENGINES=gm,im,vips,vipscli)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

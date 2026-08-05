@@ -64,7 +64,8 @@ RUN apt-get update && \
         libwebp-dev liblcms2-dev libexif-dev libtiff-dev && \
     rm -rf /var/lib/apt/lists/*
 
-RUN pip3 install pyvips --break-system-packages
+# pyvips for benchmark_resize.sh's bleed case; matplotlib for tools/plot_benchmarks.py
+RUN pip3 install pyvips matplotlib --break-system-packages
 
 # libvips from source (same version and procedure as Dockerfile.cmdbench)
 WORKDIR /tmp
@@ -99,6 +100,7 @@ COPY samples/ /app/samples/
 # harnesses pass conf/imagemagick/sRGB.icc as a profile on every single command.
 COPY conf/ /app/conf/
 COPY benchmark_resize.sh benchmark_metadata.sh /app/
+COPY tools/ /app/tools/
 
 # Fail the BUILD, not a 3am run on EC2, if vips-ffm cannot bind the source-built
 # libvips (e.g. ldconfig missed it, or the JDK is too old for final FFM).
