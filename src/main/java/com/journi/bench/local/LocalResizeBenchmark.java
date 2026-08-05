@@ -288,9 +288,12 @@ public final class LocalResizeBenchmark {
                 }}));
         }
 
+        var sourceInfo = new HyperfineExport.SourceInfo(
+            src, srcExt, srcW, srcH, Files.size(Path.of(src)), iccBytes);
+
         List<HyperfineExport.CaseResult> standardResults = measureAll(standard, warmup, measured, rss, procAvailable);
         HyperfineExport.write(formatDir.resolve("standard_resize_ffm.md"),
-            formatDir.resolve("standard_resize_ffm.json"), src, "Standard resize", standardResults);
+            formatDir.resolve("standard_resize_ffm.json"), sourceInfo, "Standard resize", standardResults);
         System.out.println();
         System.out.println("== Standard resize results written to " + formatDir.resolve("standard_resize_ffm.md") + " ==");
 
@@ -299,7 +302,7 @@ public final class LocalResizeBenchmark {
             + "px/edge, full canvas " + bleedLabel);
         List<HyperfineExport.CaseResult> bleedResults = measureAll(bleed, warmup, measured, rss, procAvailable);
         HyperfineExport.write(formatDir.resolve("bleed_resize_ffm.md"),
-            formatDir.resolve("bleed_resize_ffm.json"), src, "Bleed resize", bleedResults);
+            formatDir.resolve("bleed_resize_ffm.json"), sourceInfo, "Bleed resize", bleedResults);
         System.out.println();
         System.out.println("== Bleed resize results written to " + formatDir.resolve("bleed_resize_ffm.md") + " ==");
 

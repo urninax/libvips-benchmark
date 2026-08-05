@@ -30,6 +30,13 @@ final class HyperfineExport {
 
     private HyperfineExport() {}
 
+    /**
+     * Provenance for the fixture every case ran against. Exported so a chart or a report can
+     * identify the input by what actually matters (format, resolution, size, whether it carries
+     * an ICC profile) rather than by a filename that means nothing to a reader.
+     */
+    record SourceInfo(String path, String format, int width, int height, long bytes, int iccBytes) {}
+
     /** All times in SECONDS (hyperfine's unit). rss values in KB; -1 means "not measured". */
     record CaseResult(
         String name,
@@ -41,11 +48,18 @@ final class HyperfineExport {
         long outputBytes
     ) {}
 
-    static void write(Path mdFile, Path jsonFile, String sourcePath, String title,
+    static void write(Path mdFile, Path jsonFile, SourceInfo source, String title,
                       List<CaseResult> results) throws IOException {
         Files.createDirectories(mdFile.getParent());
-        Files.writeString(mdFile, sourcePath + "\n\n" + markdown(title, results));
-        Files.writeString(jsonFile, json(sourcePath, results));
+        Files.writeString(mdFile, describe(source) + "\n\n" + markdown(title, results));
+        Files.writeString(jsonFile, json(source, results));
+    }
+
+    private static String describe(SourceInfo s) {
+        return String.format(Locale.ROOT, "%s — %s %dx%d, %.1f MB, ICC %s",
+            s.path(), s.format().toUpperCase(Locale.ROOT), s.width(), s.height(),
+            s.bytes() / (1024.0 * 1024.0),
+            s.iccBytes() < 0 ? "absent" : s.iccBytes() + " bytes");
     }
 
     // ---- markdown ----------------------------------------------------------
@@ -110,9 +124,14 @@ final class HyperfineExport {
 
     // ---- json --------------------------------------------------------------
 
-    private static String json(String sourcePath, List<CaseResult> results) {
+    private static String json(SourceInfo src, List<CaseResult> results) {
         StringBuilder sb = new StringBuilder();
-        sb.append("{\n  \"source\": \"").append(esc(sourcePath)).append("\",\n");
+        sb.append("{\n  \"source\": \"").append(esc(src.path())).append("\",\n");
+        sb.append("  \"source_format\": \"").append(esc(src.format())).append("\",\n");
+        sb.append("  \"source_width\": ").append(src.width()).append(",\n");
+        sb.append("  \"source_height\": ").append(src.height()).append(",\n");
+        sb.append("  \"source_bytes\": ").append(src.bytes()).append(",\n");
+        sb.append("  \"source_icc_bytes\": ").append(src.iccBytes()).append(",\n");
         sb.append("  \"results\": [\n");
         for (int i = 0; i < results.size(); i++) {
             CaseResult r = results.get(i);

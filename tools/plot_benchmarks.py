@@ -76,6 +76,73 @@ DISPLAY = {k: (label, color) for _, k, label, color in ENGINES}
 DISPLAY["vips"] = ("libvips (in-process, vips-ffm)", COLOR_VIPS)
 
 
+def describe_source(data, fallback_path):
+    """A subtitle that identifies the fixture by what a reader actually needs -
+    format, resolution, size - not by a filename that means nothing to them.
+
+    Prefers the source_* fields the Java harness exports. hyperfine's own export has
+    none of them, so fall back to sniffing the file if it is still on disk."""
+    fmt = data.get("source_format")
+    w, h = data.get("source_width"), data.get("source_height")
+    size = data.get("source_bytes")
+    path = Path(data.get("source") or fallback_path)
+
+    if not fmt:
+        fmt = path.suffix.lstrip(".") or "?"
+    if size is None and path.is_file():
+        size = path.stat().st_size
+    if (not w or not h) and path.is_file():
+        w, h = sniff_dimensions(path)
+
+    parts = [fmt.upper()]
+    if w and h:
+        parts.append(f"{w}×{h}")
+    if size:
+        parts.append(f"{size / (1024 * 1024):.1f} MB")
+    return "  ·  ".join(parts)
+
+
+def sniff_dimensions(path: Path):
+    """Minimal PNG/JPEG/WebP header read, so the hyperfine-export path can still show a
+    resolution without pulling in Pillow. Returns (None, None) for anything else
+    (HEIC/AVIF included - those come from the Java export, which uses libvips)."""
+    try:
+        with path.open("rb") as f:
+            head = f.read(32)
+            if head[:8] == b"\x89PNG\r\n\x1a\n":
+                w, h = int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big")
+                return w, h
+            if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+                f.seek(0)
+                buf = f.read(64)
+                if buf[12:16] == b"VP8X":
+                    return (int.from_bytes(buf[24:27], "little") + 1,
+                            int.from_bytes(buf[27:30], "little") + 1)
+                if buf[12:16] == b"VP8 ":
+                    return (int.from_bytes(buf[26:28], "little") & 0x3FFF,
+                            int.from_bytes(buf[28:30], "little") & 0x3FFF)
+                if buf[12:16] == b"VP8L":
+                    b = int.from_bytes(buf[21:25], "little")
+                    return (b & 0x3FFF) + 1, ((b >> 14) & 0x3FFF) + 1
+                return None, None
+            if head[:2] == b"\xff\xd8":  # JPEG: walk the segment chain to SOFn
+                f.seek(2)
+                while True:
+                    marker = f.read(2)
+                    if len(marker) < 2 or marker[0] != 0xFF:
+                        return None, None
+                    length = int.from_bytes(f.read(2), "big")
+                    if marker[1] in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+                                     0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                        f.read(1)
+                        return (int.from_bytes(f.read(2), "big"),  # height first
+                                int.from_bytes(f.read(2), "big"))[::-1]
+                    f.seek(length - 2, 1)
+    except (OSError, ValueError):
+        pass
+    return None, None
+
+
 def load_results(path: Path):
     """Returns (source_label, [row, ...]). Tolerates the non-strict JSON that
     benchmark_resize.sh produces by prepending the source filename."""
@@ -85,7 +152,7 @@ def load_results(path: Path):
         raise ValueError(f"{path}: no JSON object found")
     prefix = text[:brace].strip()
     data = json.loads(text[brace:])
-    source = data.get("source") or prefix or path.stem
+    source = describe_source(data, prefix or path.stem)
 
     rows = []
     for r in data.get("results", []):
@@ -168,13 +235,6 @@ def apply_scale(ax, values, base_ylabel):
     return False
 
 
-def footnote(fig, text, lines):
-    """tight_layout() ignores fig.text, so reserve the strip explicitly or the note
-    lands on top of the x tick labels."""
-    fig.tight_layout(rect=[0, 0.035 * lines + 0.02, 1, 1])
-    fig.text(0.01, 0.008, text, fontsize=8, style="italic", color="#555555")
-
-
 def annotate_bars(ax, rects, unit="s", font_size=8.5):
     for rect in rects:
         h = rect.get_height()
@@ -242,16 +302,18 @@ def time_chart(grouped, source, title, out_path):
     annotate_bars(ax, r2)
 
     engines_present = {r["engine"] for r in base_rows} | vips_keys
-    ax.legend(handles=[mpatches.Patch(facecolor=DISPLAY[e][1], label=DISPLAY[e][0],
-                                      edgecolor="black", linewidth=0.5)
-                       for e in ("gm", "im", "vips", "vipscli") if e in engines_present],
-              fontsize=10, frameon=True, facecolor="white", edgecolor="none")
-
+    handles = [mpatches.Patch(facecolor=DISPLAY[e][1], label=DISPLAY[e][0],
+                              edgecolor="black", linewidth=0.5)
+               for e in ("gm", "im", "vips", "vipscli") if e in engines_present]
     if any(flagged):
-        footnote(fig, "* output sizes differ >10% between engines — encoder settings are not "
-                      "comparable for this operation; treat its speedup as unvalidated.", 1)
-    else:
-        fig.tight_layout()
+        # Keep the caveat attached to the marker rather than as a corner note, so the
+        # hatching can never appear unexplained.
+        handles.append(mpatches.Patch(facecolor="white", hatch="//", edgecolor="black",
+                                      linewidth=0.5,
+                                      label="* output sizes differ >10% — speedup unvalidated"))
+    ax.legend(handles=handles, fontsize=10, frameon=True, facecolor="white", edgecolor="none")
+
+    fig.tight_layout()
     fig.savefig(out_path, dpi=200)
     plt.close(fig)
     return out_path
@@ -289,13 +351,13 @@ def rss_chart(grouped, source, out_path):
     apply_scale(ax, base_vals + vips_vals, "Peak RSS attributable to the engine (MB)")
     annotate_bars(ax, r1, unit="MB")
     annotate_bars(ax, r2, unit="MB")
+    # The legend carries the "these are two different quantities" caveat, so it travels
+    # with the chart without needing a corner note.
     ax.legend(handles=[mpatches.Patch(facecolor=c, label=l, edgecolor="black", linewidth=0.5)
                        for c, l in [(COLOR_GM, "GM/IM: peak RSS of the forked child process"),
                                     (COLOR_VIPS, "libvips: peak RSS added inside the JVM")]],
               fontsize=9, frameon=True, facecolor="white", edgecolor="none")
-    footnote(fig, "Two different quantities, deliberately not summed: the subprocess engines' memory "
-                  "is their child's RSS,\nwhile in-process libvips' is growth in the JVM's own RSS over "
-                  "a pre-case baseline. Sampled every 5ms.", 2)
+    fig.tight_layout()
     fig.savefig(out_path, dpi=200)
     plt.close(fig)
     return out_path
@@ -335,9 +397,7 @@ def startup_chart(grouped, source, out_path):
     ax.set_xticklabels([short_label(o) for o in ops], fontsize=9)
     ax.set_ylim(0, max(cli + ffm) * 1.30)
     ax.legend(fontsize=10, frameon=True, facecolor="white", edgecolor="none")
-    footnote(fig, "Same libvips, same operation — the delta is process startup (exec + libvips/glib/"
-                  "plugin loading).\nIt is near-constant regardless of image size, and production pays "
-                  "it once at boot, not per image.", 2)
+    fig.tight_layout()
     fig.savefig(out_path, dpi=200)
     plt.close(fig)
     return out_path
