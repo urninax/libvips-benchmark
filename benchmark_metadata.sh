@@ -139,7 +139,6 @@ hyperfine \
     "vipsheader -a '$SRC'"
 
 prepend_source_name "$FORMAT_DIR/metadata_extract.md"
-prepend_source_name "$FORMAT_DIR/metadata_extract.json"
 
 echo
 echo "== Metadata extraction results written to $FORMAT_DIR/metadata_extract.md =="
