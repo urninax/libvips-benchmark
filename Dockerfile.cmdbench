@@ -35,6 +35,8 @@ RUN apt-get update && \
     libheif1 \
     libbz2-dev \
     libexif-dev \
+    libhwy-dev \
+    libimagequant-dev \
     libdeflate-dev && \
     apt-get purge -y ghostscript && \
     apt-get clean && \
@@ -43,16 +45,32 @@ RUN apt-get update && \
 # 3. Install pyvips Python module (required for pyvips benchmark step)
 RUN pip3 install pyvips --break-system-packages
 
-# 4. Download and compile libvips from source
+# 4. Download and compile libvips from source.
+#
+# `-Dhighway=enabled` is NOT optional. meson AUTO-DETECTS Highway, so without
+# libhwy-dev installed it silently produces a libvips with "SIMD support with
+# libhwy or liborc: false" - i.e. scalar fallbacks for the vectorised resize and
+# convolution kernels this benchmark spends all its time in. That understates
+# libvips badly and makes results non-comparable with any SIMD-enabled build.
+# `enabled` (rather than the default `auto`) turns a missing dependency into a
+# BUILD failure instead of a quietly slow image. Same reasoning for spng (faster
+# PNG decode than libpng) and imagequant (needed for pngsave palette=true).
 WORKDIR /tmp
 RUN wget https://github.com/libvips/libvips/releases/download/v${VIPS_VERSION}/vips-${VIPS_VERSION}.tar.xz && \
     tar xf vips-${VIPS_VERSION}.tar.xz && \
     cd vips-${VIPS_VERSION} && \
-    meson setup build --buildtype=release -Dintrospection=disabled && \
+    meson setup build --buildtype=release -Dintrospection=disabled \
+        -Dhighway=enabled -Dspng=enabled -Dimagequant=enabled && \
     ninja -C build && \
     ninja -C build install && \
     ldconfig && \
     cd /tmp && rm -rf vips-*
+
+# Belt and braces: assert SIMD actually made it into the built library, so a
+# regression here fails the build rather than silently producing slow numbers.
+RUN vips --version && vips --vips-config && \
+    { vips --vips-config | grep "^SIMD support" | grep -q ": true" || \
+      { echo "FATAL: libvips built WITHOUT SIMD - benchmark results would understate libvips"; exit 1; }; }
 
 WORKDIR /benchmarks
 COPY benchmark_resize.sh .
