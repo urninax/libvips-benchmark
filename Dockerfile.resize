@@ -50,4 +50,4 @@ WORKDIR /benchmarks
 COPY benchmark_resize.sh .
 COPY conf/ ./conf/
 
-ENTRYPOINT ["/bin/bash"]
+CMD ["/bin/bash"]
