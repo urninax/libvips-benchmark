@@ -13,7 +13,6 @@ RUN apt-get update && \
     add-apt-repository -y ppa:ubuntuhandbook1/libheif && \
     apt-get update && \
     apt-get install -y \
-    add-apt-repository -y ppa:ubuntuhandbook1/libheif \
     build-essential \
     meson \
     ninja-build \
@@ -24,7 +23,6 @@ RUN apt-get update && \
     python3-pip \
     graphicsmagick \
     imagemagick \
-    # Image codec dev libraries for libvips
     libglib2.0-dev \
     libexpat1-dev \
     libjpeg-turbo8-dev \
@@ -35,13 +33,12 @@ RUN apt-get update && \
     liblcms2-dev \
     libheif-plugin-libde265 \
     libheif1 \
-    libbz2-dev  \
+    libbz2-dev \
     libexif-dev \
-    libdeflate-dev \
-    &&  \
-    apt-get purge -y ghostscript &&  \
+    libdeflate-dev && \
+    apt-get purge -y ghostscript && \
     apt-get clean && \
-    rm -rf /var/lib/apt-get/lists/*
+    rm -rf /var/lib/apt/lists/*
 
 # 3. Install pyvips Python module (required for pyvips benchmark step)
 RUN pip3 install pyvips --break-system-packages
