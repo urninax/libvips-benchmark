@@ -56,6 +56,7 @@ RUN wget https://github.com/libvips/libvips/releases/download/v${VIPS_VERSION}/v
 
 WORKDIR /benchmarks
 COPY benchmark_resize.sh .
+COPY benchmark_metadata.sh .
 COPY conf/ ./conf/
 
 CMD ["/bin/bash"]
