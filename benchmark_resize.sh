@@ -41,9 +41,26 @@ EOF
   exit 1
 fi
 
-mkdir -p "$OUT_DIR"/{gm,im,vips}
+# Results (and each tool's own output images) are grouped under a
+# format-named subdir (results/jpg, results/png, ...) so repeated runs
+# against different source formats into the SAME --output-dir don't
+# overwrite each other's .md/.json/images.
+SRC_EXT="${SRC##*.}"
+SRC_FORMAT="$(printf '%s' "$SRC_EXT" | tr '[:upper:]' '[:lower:]')"
+FORMAT_DIR="$OUT_DIR/$SRC_FORMAT"
+
+mkdir -p "$FORMAT_DIR"/{gm,im,vips}
 export OMP_NUM_THREADS=1
 export VIPS_CONCURRENCY=1
+
+# Prepends the source filename (+ a blank line) to a hyperfine result file.
+# NOTE for the .json files: this makes them no longer strictly valid JSON -
+# strip the first two lines before parsing, e.g. `tail -n +3 file.json | jq .`
+prepend_source_name() {
+  local file=$1
+  [[ -f "$file" ]] || return 0
+  { printf '%s\n\n' "$SRC"; cat "$file"; } > "${file}.tmp" && mv "${file}.tmp" "$file"
+}
 
 for bin in gm convert vips python3 hyperfine; do
   command -v "$bin" >/dev/null 2>&1 || { echo "Missing required binary: $bin (see install hint above)" >&2; exit 1; }
@@ -58,7 +75,7 @@ fi
 
 read -r SRC_W SRC_H <<<"$(gm identify -format "%w %h" "$SRC")"
 echo "Source: $SRC  (${SRC_W}x${SRC_H})"
-echo "Output dir: $OUT_DIR"
+echo "Output dir: $FORMAT_DIR"
 echo
 
 # ---- aspect-preserving helpers, computed ONCE so both tools get an identical
@@ -115,31 +132,34 @@ echo
 
 hyperfine \
   --warmup 3 --min-runs 20 \
-  --export-markdown "$OUT_DIR/standard_resize.md" \
-  --export-json "$OUT_DIR/standard_resize.json" \
+  --export-markdown "$FORMAT_DIR/standard_resize.md" \
+  --export-json "$FORMAT_DIR/standard_resize.json" \
   -n "GM   thumb ${THUMB} (jpg q85)" \
-    "gm convert -size ${THUMB} '$SRC' -auto-orient -profile '$ICC' -strip -colorspace RGB -quality 85 -type truecolor -background '#ffffff' -flatten -filter Lanczos -resize '${THUMB}!' 'jpg:$OUT_DIR/gm/thumb.jpg'" \
+    "gm convert -size ${THUMB} '$SRC' -auto-orient -type truecolor -background '#ffffff' -flatten -filter Lanczos -resize '${THUMB}!' -profile '$ICC' -strip -colorspace RGB -quality 85 'jpg:$FORMAT_DIR/gm/thumb.jpg'" \
   -n "vips thumb ${THUMB} (jpg q85)" \
-    "vips thumbnail '$SRC' '$OUT_DIR/vips/thumb.jpg[Q=85,strip]' $THUMB_W --height $THUMB_H --size force --export-profile '$ICC'" \
+    "vips thumbnail '$SRC' '$FORMAT_DIR/vips/thumb.jpg[Q=85,strip]' $THUMB_W --height $THUMB_H --size force --export-profile '$ICC'" \
   -n "GM   mobileFull ${FULL} (jpg q85)" \
-    "gm convert -size ${FULL} '$SRC' -auto-orient -profile '$ICC' -strip -colorspace RGB -quality 85 -type truecolor -background '#ffffff' -flatten -filter Lanczos -resize '${FULL}!' 'jpg:$OUT_DIR/gm/full.jpg'" \
+    "gm convert -size ${FULL} '$SRC' -auto-orient -type truecolor -background '#ffffff' -flatten -filter Lanczos -resize '${FULL}!' -profile '$ICC' -strip -colorspace RGB -quality 85 'jpg:$FORMAT_DIR/gm/full.jpg'" \
   -n "vips mobileFull ${FULL} (jpg q85)" \
-    "vips thumbnail '$SRC' '$OUT_DIR/vips/full.jpg[Q=85,strip]' $FULL_W --height $FULL_H --size force --export-profile '$ICC'" \
+    "vips thumbnail '$SRC' '$FORMAT_DIR/vips/full.jpg[Q=85,strip,optimize_coding=false]' $FULL_W --height $FULL_H --size force --export-profile '$ICC'" \
   -n "GM   mobileFullWebp ${FULL} (webp q85)" \
-    "gm convert -size ${FULL} '$SRC' -auto-orient -profile '$ICC' -strip -colorspace RGB -quality 85 -background none -filter Lanczos -resize '${FULL}!' 'webp:$OUT_DIR/gm/full.webp'" \
+    "gm convert -size ${FULL} '$SRC' -auto-orient -background none -filter Lanczos -resize '${FULL}!' -profile '$ICC' -strip -colorspace RGB -quality 85 'webp:$FORMAT_DIR/gm/full.webp'" \
   -n "vips mobileFullWebp ${FULL} (webp q85)" \
-    "vips thumbnail '$SRC' '$OUT_DIR/vips/full.webp[Q=85,strip]' $FULL_W --height $FULL_H --size force --export-profile '$ICC'" \
+    "vips thumbnail '$SRC' '$FORMAT_DIR/vips/full.webp[Q=85,strip]' $FULL_W --height $FULL_H --size force --export-profile '$ICC'" \
   -n "GM   mobileFullPng ${FULL} (png)" \
-    "gm convert -size ${FULL} '$SRC' -auto-orient -profile '$ICC' -strip -colorspace RGB -define png:filter-type=6 -background none -filter Lanczos -resize '${FULL}!' 'png:$OUT_DIR/gm/full.png'" \
+    "gm convert -size ${FULL} '$SRC' -auto-orient -define png:filter-type=6 -background none -filter Lanczos -resize '${FULL}!' -profile '$ICC' -strip -colorspace RGB 'png:$FORMAT_DIR/gm/full.png'" \
   -n "vips mobileFullPng ${FULL} (png)" \
-    "vips thumbnail '$SRC' '$OUT_DIR/vips/full.png[strip]' $FULL_W --height $FULL_H --size force --export-profile '$ICC'" \
+    "vips thumbnail '$SRC' '$FORMAT_DIR/vips/full.png[strip]' $FULL_W --height $FULL_H --size force --export-profile '$ICC'" \
   -n "GM   original ${ORIG} (jpg q85, keepExif)" \
-    "gm convert -size ${SRC_W}x${SRC_H} '$SRC' -colorspace RGB -quality 85 -type truecolor -background '#ffffff' -flatten -filter Lanczos -resize '${ORIG}!' 'jpg:$OUT_DIR/gm/orig.jpg'" \
+    "gm convert -size ${SRC_W}x${SRC_H} '$SRC' -type truecolor -background '#ffffff' -flatten -filter Lanczos -resize '${ORIG}!' -colorspace RGB -quality 85 'jpg:$FORMAT_DIR/gm/orig.jpg'" \
   -n "vips original ${ORIG} (jpg q85, keepExif)" \
-    "vips thumbnail '$SRC' '$OUT_DIR/vips/orig.jpg[Q=85]' $ORIG_W --height $ORIG_H --size force --no-rotate"
+    "vips thumbnail '$SRC' '$FORMAT_DIR/vips/orig.jpg[Q=85]' $ORIG_W --height $ORIG_H --size force --no-rotate"
+
+prepend_source_name "$FORMAT_DIR/standard_resize.md"
+prepend_source_name "$FORMAT_DIR/standard_resize.json"
 
 echo
-echo "== Standard resize results written to $OUT_DIR/standard_resize.md =="
+echo "== Standard resize results written to $FORMAT_DIR/standard_resize.md =="
 echo
 
 # ============================================================================
@@ -147,8 +167,6 @@ echo
 # ============================================================================
 
 BLEED_PX=36
-CONTENT_W=2480
-CONTENT_H=3508
 BLEED_FULL_W=$((ORIG_W + 2 * BLEED_PX))   # bleed on left+right
 BLEED_FULL_H=$((ORIG_H + 2 * BLEED_PX))   # bleed on top+bottom
 
@@ -157,17 +175,23 @@ echo
 
 hyperfine \
   --warmup 3 --min-runs 20 \
-  --export-markdown "$OUT_DIR/bleed_resize.md" \
-  --export-json "$OUT_DIR/bleed_resize.json" \
+  --export-markdown "$FORMAT_DIR/bleed_resize.md" \
+  --export-json "$FORMAT_DIR/bleed_resize.json" \
+  --show-output \
   -n "IM   bleed page ${BLEED_FULL_W}x${BLEED_FULL_H} (jpg q85, mirror-extend ${BLEED_PX}px)" \
-    "convert -size ${BLEED_FULL_W}x${BLEED_FULL_H} '$SRC' -auto-orient -profile '$ICC' -strip -colorspace sRGB -quality 85 -alpha remove -type truecolor -resize '${CONTENT_W}x${CONTENT_H}^' -virtual-pixel Mirror -set option:distort:viewport '%[fx:w+$((2*BLEED_PX))]x%[fx:h+$((2*BLEED_PX))]-${BLEED_PX}-${BLEED_PX}' -distort SRT 0 -gravity center -extent ${BLEED_FULL_W}x${BLEED_FULL_H} 'jpg:$OUT_DIR/im/bleed.jpg'" \
+    "convert -size ${BLEED_FULL_W}x${BLEED_FULL_H} '$SRC' -auto-orient -profile '$ICC' -strip -colorspace sRGB -quality 85 -alpha remove -type truecolor -resize '${ORIG_W}x${ORIG_H}^' -gravity center -virtual-pixel Mirror -set option:distort:viewport '%[fx:w+$((2*BLEED_PX))]x%[fx:h+$((2*BLEED_PX))]-${BLEED_PX}-${BLEED_PX}' -distort SRT 0 'jpg:$FORMAT_DIR/im/bleed.jpg'" \
   -n "vips bleed page ${BLEED_FULL_W}x${BLEED_FULL_H} (jpg q85, mirror-extend ${BLEED_PX}px)" \
-    "python3 -c \"import pyvips; img = pyvips.Image.thumbnail('$SRC', $ORIG_W, height=$ORIG_H, crop='centre', export_profile='$ICC'); img = img.embed($BLEED_PX, $BLEED_PX, $BLEED_FULL_W, $BLEED_FULL_H, extend='mirror'); img.write_to_file('$OUT_DIR/vips/bleed.jpg[Q=85,strip]')\""
+    "python3 -c \"import pyvips; img = pyvips.Image.thumbnail('$SRC', $ORIG_W, height=$ORIG_H, crop='centre', export_profile='$ICC'); img = img.embed($BLEED_PX, $BLEED_PX, $BLEED_FULL_W, $BLEED_FULL_H, extend='mirror'); img.write_to_file('$FORMAT_DIR/vips/bleed.jpg[Q=85,strip]')\""
+
+prepend_source_name "$FORMAT_DIR/bleed_resize.md"
+prepend_source_name "$FORMAT_DIR/bleed_resize.json"
 
 echo
-echo "== Bleed resize results written to $OUT_DIR/bleed_resize.md =="
+echo "== Bleed resize results written to $FORMAT_DIR/bleed_resize.md =="
 echo
 echo "All results (with per-command mean/stddev/min/max) are in:"
-echo "  $OUT_DIR/standard_resize.md"
-echo "  $OUT_DIR/bleed_resize.md"
-echo "Raw JSON (for custom analysis/plots) is next to each .md file."
+echo "  $FORMAT_DIR/standard_resize.md"
+echo "  $FORMAT_DIR/bleed_resize.md"
+echo "Raw JSON (for custom analysis/plots) is next to each .md file - note the"
+echo "prepended source-filename line makes them non-strict JSON; strip it first:"
+echo "  tail -n +3 $FORMAT_DIR/standard_resize.json | jq ."
