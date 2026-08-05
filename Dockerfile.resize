@@ -8,7 +8,12 @@ RUN echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4 && \
     sed -i 's|http://archive.ubuntu.com/ubuntu/|http://mirrors.edge.kernel.org/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources
 
 # 2. Install build tools, benchmark binaries, and libvips delegate dependencies in ONE layer
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && \
+    apt-get install -y software-properties-common && \
+    add-apt-repository -y ppa:ubuntuhandbook1/libheif && \
+    apt-get update && \
+    apt-get install -y \
+    add-apt-repository -y ppa:ubuntuhandbook1/libheif \
     build-essential \
     meson \
     ninja-build \
@@ -28,9 +33,15 @@ RUN apt-get update && apt-get install -y \
     libwebp-dev \
     libheif-dev \
     liblcms2-dev \
+    libheif-plugin-libde265 \
+    libheif1 \
+    libbz2-dev  \
     libexif-dev \
     libdeflate-dev \
-    && rm -rf /var/lib/apt-get/lists/*
+    &&  \
+    apt-get purge -y ghostscript &&  \
+    apt-get clean && \
+    rm -rf /var/lib/apt-get/lists/*
 
 # 3. Install pyvips Python module (required for pyvips benchmark step)
 RUN pip3 install pyvips --break-system-packages
