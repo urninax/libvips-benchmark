@@ -152,7 +152,7 @@ public final class GmStandardVariant implements Variant {
     }
 
     /** Mirrors ResizeMode.Area: scale to fit a total pixel budget, preserving aspect ratio. */
-    static int[] areaFit(int w, int h, long targetPixels) {
+    public static int[] areaFit(int w, int h, long targetPixels) {
         double scale = Math.sqrt((double) targetPixels / (w * (double) h));
         if (scale > 1) scale = 1;
         return new int[]{(int) Math.round(w * scale), (int) Math.round(h * scale)};

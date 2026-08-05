@@ -22,11 +22,11 @@ import java.util.concurrent.TimeUnit;
  * model would be oversubscribed by ~8x and invalidate the whole comparison -
  * verified via `convert -list resource` during the build-order spike.
  */
-final class ProcessRunner {
+public final class ProcessRunner {
 
     private ProcessRunner() {}
 
-    static void run(List<String> argv, RssSampler rssSampler, long timeoutSeconds) throws IOException, InterruptedException {
+    public static void run(List<String> argv, RssSampler rssSampler, long timeoutSeconds) throws IOException, InterruptedException {
         ProcessBuilder pb = new ProcessBuilder(argv);
         pb.environment().put("OMP_NUM_THREADS", "1");
         pb.environment().put("MAGICK_THREAD_LIMIT", "1");
