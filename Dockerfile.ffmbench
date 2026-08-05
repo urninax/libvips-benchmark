@@ -60,6 +60,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         build-essential meson ninja-build pkg-config wget ca-certificates \
         hyperfine python3 python3-pip procps \
+        libhwy-dev libimagequant-dev \
         libglib2.0-dev libexpat1-dev libjpeg-turbo8-dev libpng-dev libspng-dev \
         libwebp-dev liblcms2-dev libexif-dev libtiff-dev && \
     rm -rf /var/lib/apt/lists/*
@@ -67,18 +68,35 @@ RUN apt-get update && \
 # pyvips for benchmark_resize.sh's bleed case; matplotlib for tools/plot_benchmarks.py
 RUN pip3 install pyvips matplotlib --break-system-packages
 
-# libvips from source (same version and procedure as Dockerfile.cmdbench)
+# libvips from source (same version and procedure as Dockerfile.cmdbench).
+#
+# `-Dhighway=enabled` is NOT optional. meson AUTO-DETECTS Highway, so without
+# libhwy-dev installed it silently produces a libvips reporting "SIMD support
+# with libhwy or liborc: false" - scalar fallbacks for the vectorised resize and
+# convolution kernels this benchmark spends all its time in. That understates
+# libvips badly and makes results non-comparable with any SIMD-enabled build
+# (this actually happened: the first image built here had SIMD off). `enabled`
+# rather than the default `auto` turns a missing dependency into a BUILD failure
+# instead of a quietly slow image. Same for spng (faster PNG decode than libpng)
+# and imagequant (needed for pngsave palette=true).
 WORKDIR /tmp
 RUN wget -q https://github.com/libvips/libvips/releases/download/v${VIPS_VERSION}/vips-${VIPS_VERSION}.tar.xz && \
     tar xf vips-${VIPS_VERSION}.tar.xz && \
     cd vips-${VIPS_VERSION} && \
-    meson setup build --buildtype=release -Dintrospection=disabled && \
+    meson setup build --buildtype=release -Dintrospection=disabled \
+        -Dhighway=enabled -Dspng=enabled -Dimagequant=enabled && \
     ninja -C build && \
     ninja -C build install && \
     ldconfig && \
     cd /tmp && rm -rf vips-* && \
     vips --version && \
     ldconfig -p | grep -E 'libvips\.so\.42|libgobject-2\.0\.so\.0'
+
+# Assert SIMD actually made it into the built library, and record the full build
+# configuration in the build log as provenance for whatever the results claim.
+RUN vips --vips-config && \
+    { vips --vips-config | grep "^SIMD support" | grep -q ": true" || \
+      { echo "FATAL: libvips built WITHOUT SIMD - benchmark results would understate libvips"; exit 1; }; }
 WORKDIR /app
 
 # ---------- stage 2: Maven build with cached dependency layer ----------
