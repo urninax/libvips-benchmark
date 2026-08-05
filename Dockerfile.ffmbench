@@ -1,0 +1,112 @@
+# ============================================================================
+# Image for the LOCAL resize benchmark: libvips in-process via vips-ffm vs
+# gm/convert forked as CLI subprocesses.
+#
+# WHY A SEPARATE IMAGE FROM Dockerfile: the main image installs Ubuntu's distro
+# libvips (libvips42, 8.15.x on Noble), while Dockerfile.cmdbench builds 8.18.5
+# from source. Running the Java harness against 8.15 and comparing it to CLI
+# numbers produced against 8.18.5 would be a version confound. This image has
+# ONE libvips (8.18.5, source-built) plus a JDK plus hyperfine plus pyvips, so
+# BOTH harnesses - `bench.jar local-resize` and `benchmark_resize.sh` - run
+# against byte-identical libraries on the same machine. That is what makes the
+# GM cross-check and the in-process-vs-CLI delta meaningful.
+#
+# Build (amd64, on the EC2 host - native, no QEMU):
+#   docker build --platform linux/amd64 -f Dockerfile.ffmbench -t libvips-ffmbench .
+#
+# Run (VIPS_CONCURRENCY is mandatory - the harness exits 2 without it, because
+# libvips cannot be told its concurrency from inside the JVM):
+#   docker run --rm --platform linux/amd64 --cpuset-cpus=0-3 \
+#     -e VIPS_CONCURRENCY=1 -e OMP_NUM_THREADS=1 \
+#     -v "$PWD/results-ffm:/results" \
+#     libvips-ffmbench local-resize samples/baseline.jpg /results
+#
+# The CLI comparison, in the SAME container:
+#   docker run --rm --platform linux/amd64 --cpuset-cpus=0-3 --entrypoint /bin/bash \
+#     -v "$PWD/results-cli:/results" libvips-ffmbench \
+#     -c './benchmark_resize.sh samples/baseline.jpg /results'
+# ============================================================================
+
+# ---------- stage 1: native toolchain ----------
+FROM eclipse-temurin:25-jdk-noble AS native
+ENV DEBIAN_FRONTEND=noninteractive
+ARG VIPS_VERSION=8.18.5
+WORKDIR /app
+
+# ImageMagick - copied verbatim from Dockerfile (policy.xml patches + version assert)
+RUN apt-get update && \
+    apt-get install -y imagemagick && \
+    apt-get purge -y ghostscript && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* && \
+    sed -i 's_<policy domain="resource" name="\([widthheight]*\)" value="[0-9]*[KP]*"/>_<policy domain="resource" name="\1" value="20KP"/>_' /etc/ImageMagick-6/policy.xml && \
+    sed -i 's_<policy domain="resource" name="\([memoryarea]*\)" value="[0-9]*[MPMiB]*"/>_<policy domain="resource" name="\1" value="2GiB"/>_' /etc/ImageMagick-6/policy.xml && \
+    convert --version | grep -i "ImageMagick" | head -n 1 | awk '{print $3}' | grep -q "6.9" || exit 1
+
+# GraphicsMagick - copied verbatim from Dockerfile
+RUN apt-get update && \
+    apt-get install -y software-properties-common && \
+    add-apt-repository -y ppa:ubuntuhandbook1/libheif && \
+    apt-get update && \
+    apt-get install -y webp libltdl-dev zlib1g-dev google-perftools libgoogle-perftools-dev libjpeg-dev libpng-dev \
+            libheif1 libheif-plugin-libde265 libbz2-dev libdeflate-dev libheif-dev graphicsmagick && \
+    rm -rf /var/lib/apt/lists/*
+
+# libvips build deps + the benchmark tooling the CLI harness needs.
+# Deliberately NOT installing libvips42/libvips-dev from apt - the source build
+# below is the only libvips in this image, so vips-ffm and the `vips` CLI cannot
+# end up bound to different versions.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        build-essential meson ninja-build pkg-config wget ca-certificates \
+        hyperfine python3 python3-pip procps \
+        libglib2.0-dev libexpat1-dev libjpeg-turbo8-dev libpng-dev libspng-dev \
+        libwebp-dev liblcms2-dev libexif-dev libtiff-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install pyvips --break-system-packages
+
+# libvips from source (same version and procedure as Dockerfile.cmdbench)
+WORKDIR /tmp
+RUN wget -q https://github.com/libvips/libvips/releases/download/v${VIPS_VERSION}/vips-${VIPS_VERSION}.tar.xz && \
+    tar xf vips-${VIPS_VERSION}.tar.xz && \
+    cd vips-${VIPS_VERSION} && \
+    meson setup build --buildtype=release -Dintrospection=disabled && \
+    ninja -C build && \
+    ninja -C build install && \
+    ldconfig && \
+    cd /tmp && rm -rf vips-* && \
+    vips --version && \
+    ldconfig -p | grep -E 'libvips\.so\.42|libgobject-2\.0\.so\.0'
+WORKDIR /app
+
+# ---------- stage 2: Maven build with cached dependency layer ----------
+FROM native AS deps
+RUN apt-get update && apt-get install -y --no-install-recommends maven && rm -rf /var/lib/apt/lists/*
+COPY pom.xml ./
+RUN mvn -q -B dependency:go-offline || true
+
+FROM deps AS builder
+COPY src/ src/
+RUN mvn -q -B package
+
+# ---------- stage 3: final ----------
+FROM native AS ffmbench
+WORKDIR /app
+COPY --from=builder /app/target/bench.jar /app/bench.jar
+COPY samples/ /app/samples/
+# The main Dockerfile does NOT copy conf/ - this benchmark needs it, because both
+# harnesses pass conf/imagemagick/sRGB.icc as a profile on every single command.
+COPY conf/ /app/conf/
+COPY benchmark_resize.sh benchmark_metadata.sh /app/
+
+# Fail the BUILD, not a 3am run on EC2, if vips-ffm cannot bind the source-built
+# libvips (e.g. ldconfig missed it, or the JDK is too old for final FFM).
+RUN java --enable-native-access=ALL-UNNAMED -jar /app/bench.jar smoke-test
+
+# Fixed heap (Xms==Xmx) + AlwaysPreTouch so the JVM's own pages are resident before
+# the first measurement: the per-case RSS baseline then captures the whole heap, and
+# any growth attributed to a case is genuinely native libvips allocation rather than
+# the JVM lazily touching heap it reserved at startup.
+ENTRYPOINT ["java", "--enable-native-access=ALL-UNNAMED", "-Xms2g", "-Xmx2g", "-XX:+AlwaysPreTouch", "-jar", "/app/bench.jar"]
+CMD ["local-resize", "samples/baseline.jpg", "/results"]

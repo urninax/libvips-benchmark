@@ -3,6 +3,7 @@ package com.journi.bench;
 import com.journi.bench.harness.DrainHarness;
 import com.journi.bench.harness.DrainStats;
 import com.journi.bench.harness.ResultTable;
+import com.journi.bench.local.LocalResizeBenchmark;
 import com.journi.bench.metrics.RssSampler;
 import com.journi.bench.s3.S3Support;
 import com.journi.bench.variant.*;
@@ -29,7 +30,11 @@ public final class Main {
             case "seed" -> seed(cfg);
             case "smoke-test" -> smokeTest(cfg);
             case "run" -> run(cfg);
-            default -> throw new IllegalArgumentException("Unknown command: " + cmd + " (expected: run, seed, smoke-test)");
+            // Local-file resize benchmark: libvips in-process (vips-ffm) vs gm/convert forked as
+            // subprocesses. No S3 - BenchConfig.fromEnv() above only reads env, and no S3 client
+            // is constructed unless seed/run is dispatched.
+            case "local-resize" -> LocalResizeBenchmark.run(cfg, args);
+            default -> throw new IllegalArgumentException("Unknown command: " + cmd + " (expected: run, seed, smoke-test, local-resize)");
         }
     }
 
