@@ -115,6 +115,14 @@ echo
 # PART 1 — Standard (non-bleed) resize: GraphicsMagick vs libvips
 #   This project uses GM (not IM) for every non-bleed resize.
 #
+# `filter=all` on the vips PNG output is NOT optional either: libvips' pngsave
+# defaults to NO row filtering (filter=none) while GM's `-define png:filter-type=6`
+# is adaptive. Left at the default, vips emits a 28% larger PNG in a quarter of the
+# time - not because it is faster, but because it is skipping work GM is doing.
+# Matched (verified on this repo's sample_original.jpg at 1125x2000): vips 3.20MB in
+# 0.64s vs GM 3.33MB in ~1.02s - vips still smaller and still faster, by ~1.6x rather
+# than the fictional 4.2x.
+#
 # `-size <target>` BEFORE the source path on every GM downscale command below
 # is a libjpeg read-time hint (DCT-domain scaled decompression, 1/1-1/8) -
 # WITHOUT it, GM always fully decodes the source at its real resolution before
@@ -149,7 +157,7 @@ hyperfine \
   -n "GM   mobileFullPng ${FULL} (png)" \
     "gm convert -size ${FULL} '$SRC' -auto-orient -define png:filter-type=6 -background none -filter Lanczos -resize '${FULL}!' -profile '$ICC' -strip -colorspace RGB 'png:$FORMAT_DIR/gm/full.png'" \
   -n "vips mobileFullPng ${FULL} (png)" \
-    "vips thumbnail '$SRC' '$FORMAT_DIR/vips/full.png[strip]' $FULL_W --height $FULL_H --size force --export-profile '$ICC'" \
+    "vips thumbnail '$SRC' '$FORMAT_DIR/vips/full.png[strip,filter=all]' $FULL_W --height $FULL_H --size force --export-profile '$ICC'" \
   -n "GM   original ${ORIG} (jpg q85, keepExif)" \
     "gm convert -size ${SRC_W}x${SRC_H} '$SRC' -type truecolor -background '#ffffff' -flatten -filter Lanczos -resize '${ORIG}!' -colorspace RGB -quality 85 'jpg:$FORMAT_DIR/gm/orig.jpg'" \
   -n "vips original ${ORIG} (jpg q85, keepExif)" \
