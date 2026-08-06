@@ -137,12 +137,16 @@ public final class LocalResizeBenchmark {
         // timed region, which would hand GM an extra fork+exec per iteration that the bash script
         // never pays, and would break the hyperfine cross-check.
         int srcW, srcH, iccBytes;
+        String srcLoader;
         try (Arena arena = Arena.ofConfined()) {
             VImage probe = VImage.newFromFile(arena, src);
             srcW = probe.getWidth();
             srcH = probe.getHeight();
             VBlob embedded = probe.getBlob("icc-profile-data");
             iccBytes = embedded == null ? -1 : embedded.getBytes().length;
+            // Loader name rather than file extension: .HEIC/.heif/.avif all route through
+            // heifload, and an extension can lie.
+            srcLoader = probe.getString("vips-loader");
         }
 
         int[] thumb = minFit(srcW, srcH, 320, 320);
@@ -173,6 +177,7 @@ public final class LocalResizeBenchmark {
             System.out.println("NOTE: the 'original' case is NOT a downscale for this source "
                 + "(16.7MP budget >= " + srcW + "x" + srcH + "), so it measures decode + re-encode only.");
         }
+        warnIfThreadPinsDoNotApply(srcLoader, concurrency);
         System.out.println();
 
         boolean procAvailable = Files.isDirectory(Path.of("/proc/self"));
@@ -251,7 +256,15 @@ public final class LocalResizeBenchmark {
                             VipsOption.Int("height", full[1]),
                             VipsOption.Enum("size", VipsSize.SIZE_FORCE),
                             VipsOption.String("export-profile", iccStr))
-                        .pngsave(o4.toString(), VipsOption.Boolean("strip", true));
+                        // filter=248 is libpng's PNG_ALL_FILTERS (0xF8), i.e. adaptive per-row
+                        // filtering - the equivalent of GM's `-define png:filter-type=6`.
+                        // libvips' pngsave DEFAULTS TO NONE (0x08), which is why this row used to
+                        // emit a 28% larger file than GM in 4x the speed: it was skipping the
+                        // filtering GM was doing, so it compared different work AND different
+                        // output. Matched, vips produces a SMALLER file than GM (3.20 vs 3.33 MB)
+                        // and is still ~1.6x faster - the honest number, vs the inflated 4.2x.
+                        .pngsave(o4.toString(), VipsOption.Boolean("strip", true),
+                            VipsOption.Int("filter", 248));
                 }}));
 
             Path o5 = vipsDir.resolve("orig.jpg");
@@ -327,6 +340,32 @@ public final class LocalResizeBenchmark {
         System.out.println("Charts:  python3 tools/plot_benchmarks.py " + formatDir);
     }
 
+    /**
+     * HEIC/AVIF decoding escapes every thread pin this benchmark relies on, so a run against one
+     * is only comparable to another run with the SAME cpuset.
+     *
+     * libheif/libde265 runs its own HEVC decoder thread pool, and none of VIPS_CONCURRENCY,
+     * OMP_NUM_THREADS or MAGICK_THREAD_LIMIT reaches it. Verified: with all three pinned to 1, the
+     * same 3024x4032 HEIC gives vips real=0.28s / user=0.64s and gm real=0.40s / user=0.75s - user
+     * time ~2x wall time, i.e. several threads - while the identical operations on a JPEG source
+     * stay strictly single-threaded (real=0.11s / user=0.09s).
+     *
+     * Consequence seen for real: the same HEIC test run at `taskset -c 0` versus
+     * `--cpuset-cpus=0-3` differed by a near-constant ~280ms on EVERY command, GM and IM included
+     * - one fixed decode getting cheaper with more cores, not any per-operation speedup.
+     */
+    private static void warnIfThreadPinsDoNotApply(String loader, String concurrency) {
+        if (loader == null || !loader.toLowerCase(Locale.ROOT).startsWith("heif")) return;
+        System.out.println();
+        System.out.println("WARNING: HEIC/AVIF source (vips-loader=" + loader + ") — the thread pins do NOT reach the decoder.");
+        System.out.println("  libheif/libde265 runs its own HEVC decoder thread pool. VIPS_CONCURRENCY=" + concurrency
+            + ", OMP_NUM_THREADS and MAGICK_THREAD_LIMIT have no effect on it, for GM/IM and vips alike.");
+        System.out.println("  * These timings scale with the container's cpuset. Only compare them against runs");
+        System.out.println("    with the SAME --cpuset-cpus; container-level pinning is the only lever that works.");
+        System.out.println("  * Unlike the JPEG rows, this does NOT model one single-threaded worker per image —");
+        System.out.println("    under a real cores*2 worker pool those decoder threads would contend for cores.");
+    }
+
     // ---- measurement -------------------------------------------------------
 
     private static List<HyperfineExport.CaseResult> measureAll(List<LocalCase> cases, int warmup, int measured,
@@ -392,11 +431,19 @@ public final class LocalResizeBenchmark {
     }
 
     /**
-     * Encoder settings are NOT guaranteed comparable across engines: GM's `-define
-     * png:filter-type=6` and its WebP delegate defaults versus libvips' pngsave/webpsave defaults
-     * change encode time by multiples. If the two engines emit very different file sizes for the
-     * same case, the row is measuring whose default compression effort is lower - not which
-     * library is faster - so say so rather than letting it into a headline number.
+     * Flags cases where the two engines did not produce equivalent output, so the row cannot be
+     * quoted as a clean speedup. Deliberately does NOT assert a cause - investigating this
+     * benchmark's own PNG and WebP rows turned up two entirely different ones:
+     *
+     * - PNG was an encoder-settings mismatch. libvips' pngsave defaults to filter=none while GM
+     *   does adaptive filtering, so vips emitted a 28% larger file in a quarter of the time by
+     *   skipping work GM was doing. Fixed by passing filter=248 (PNG_ALL_FILTERS); matched, vips
+     *   is smaller AND still faster, but by ~1.6x rather than the fictional 4.2x.
+     * - WebP was NOT the encoder. Feeding both encoders the SAME pixels gives 308156 vs 307944
+     *   bytes - 0.07% apart - and GM turned out to be plain libwebp defaults, byte-identical to
+     *   `cwebp -q 85`. The ~11% gap comes from the RESAMPLERS: vips' resize is marginally sharper
+     *   than GM's Lanczos (RMSE 0.73% between the two outputs) and sharper images compress worse.
+     *   That is a real property of the libraries, not a misconfiguration, and not "fixable".
      */
     private static void printValidityGates(List<HyperfineExport.CaseResult> all) {
         System.out.println();
@@ -423,8 +470,9 @@ public final class LocalResizeBenchmark {
                 if (delta > 0.10) {
                     any = true;
                     System.out.printf(Locale.ROOT,
-                        "WARNING [%s]: output sizes differ by %.0f%% (%s=%dKB vs %s=%dKB) — encoder settings "
-                        + "are not comparable; exclude this row from any headline speedup.%n",
+                        "WARNING [%s]: outputs are not equivalent — sizes differ by %.0f%% "
+                        + "(%s=%dKB vs %s=%dKB). Could be encoder settings or just a different "
+                        + "resampler; check before quoting this row as a clean speedup.%n",
                         suffix.trim(), delta * 100, gmName, gm / 1024, vipsName, vips / 1024);
                 }
             }

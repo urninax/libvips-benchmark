@@ -111,9 +111,40 @@ ORIG_W="${ORIG%%x*}";   ORIG_H="${ORIG##*x}"
 echo "Computed targets — thumb:${THUMB}  mobileFull:${FULL}  original:${ORIG}"
 echo
 
+# HEIC/AVIF decoding escapes the thread pins this script sets at the top, so such a
+# run is only comparable against another run with the SAME cpu allocation.
+# libheif/libde265 runs its own HEVC decoder thread pool that OMP_NUM_THREADS,
+# MAGICK_THREAD_LIMIT and VIPS_CONCURRENCY do not reach. Verified with all three set
+# to 1: the same 3024x4032 HEIC gives vips real=0.28s/user=0.64s and gm
+# real=0.40s/user=0.75s (user ~2x wall = multiple threads), while identical operations
+# on a JPEG source stay strictly single-threaded (real=0.11s/user=0.09s).
+case "$SRC_FORMAT" in
+  heic|heif|avif)
+    cat >&2 <<'WARN'
+WARNING: HEIC/AVIF source — the thread pins above do NOT reach the decoder.
+  libheif/libde265 runs its own HEVC decoder thread pool; OMP_NUM_THREADS,
+  MAGICK_THREAD_LIMIT and VIPS_CONCURRENCY have no effect on it, for GM/IM and vips.
+  * These timings scale with however many CPUs the container/taskset allows. Only
+    compare them against runs with the SAME allocation - running this under
+    `taskset -c 0` versus `--cpuset-cpus=0-3` shifted EVERY command by a constant
+    ~280ms, which is one fixed decode getting cheaper, not a per-operation speedup.
+  * Unlike the JPEG rows, this does NOT model one single-threaded worker per image.
+WARN
+    echo >&2
+    ;;
+esac
+
 # ============================================================================
 # PART 1 — Standard (non-bleed) resize: GraphicsMagick vs libvips
 #   This project uses GM (not IM) for every non-bleed resize.
+#
+# `filter=all` on the vips PNG output is NOT optional either: libvips' pngsave
+# defaults to NO row filtering (filter=none) while GM's `-define png:filter-type=6`
+# is adaptive. Left at the default, vips emits a 28% larger PNG in a quarter of the
+# time - not because it is faster, but because it is skipping work GM is doing.
+# Matched (verified on this repo's sample_original.jpg at 1125x2000): vips 3.20MB in
+# 0.64s vs GM 3.33MB in ~1.02s - vips still smaller and still faster, by ~1.6x rather
+# than the fictional 4.2x.
 #
 # `-size <target>` BEFORE the source path on every GM downscale command below
 # is a libjpeg read-time hint (DCT-domain scaled decompression, 1/1-1/8) -
@@ -149,7 +180,7 @@ hyperfine \
   -n "GM   mobileFullPng ${FULL} (png)" \
     "gm convert -size ${FULL} '$SRC' -auto-orient -define png:filter-type=6 -background none -filter Lanczos -resize '${FULL}!' -profile '$ICC' -strip -colorspace RGB 'png:$FORMAT_DIR/gm/full.png'" \
   -n "vips mobileFullPng ${FULL} (png)" \
-    "vips thumbnail '$SRC' '$FORMAT_DIR/vips/full.png[strip]' $FULL_W --height $FULL_H --size force --export-profile '$ICC'" \
+    "vips thumbnail '$SRC' '$FORMAT_DIR/vips/full.png[strip,filter=all]' $FULL_W --height $FULL_H --size force --export-profile '$ICC'" \
   -n "GM   original ${ORIG} (jpg q85, keepExif)" \
     "gm convert -size ${SRC_W}x${SRC_H} '$SRC' -type truecolor -background '#ffffff' -flatten -filter Lanczos -resize '${ORIG}!' -colorspace RGB -quality 85 'jpg:$FORMAT_DIR/gm/orig.jpg'" \
   -n "vips original ${ORIG} (jpg q85, keepExif)" \
