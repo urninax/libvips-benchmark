@@ -173,6 +173,7 @@ def load_results(path: Path):
             "stddev": r.get("stddev") or 0.0,
             "rss_self_kb": r.get("rss_self_kb", -1),
             "rss_children_kb": r.get("rss_children_kb", -1),
+            "vips_tracked_peak_kb": r.get("vips_tracked_peak_kb", -1),
             "output_bytes": r.get("output_bytes", -1),
         })
     return source, rows
@@ -193,14 +194,18 @@ def pick(by_engine, keys):
     return None, None
 
 
-def attributable_rss_mb(row):
-    """The peak RSS that actually belongs to this engine.
+def attributable_memory_mb(row):
+    """Peak memory that actually belongs to this engine - a DIFFERENT metric per engine,
+    because no single one is meaningful for both.
 
-    rssSelf and rssChildren are DIFFERENT QUANTITIES and must never be summed: a
-    forked gm/convert's memory lands in children while the JVM merely waits, and
-    in-process libvips' memory lands in self while there are no children at all.
-    So take the one that is meaningful for the engine, not a total."""
-    kb = row["rss_children_kb"] if row["engine"] in SUBPROCESS_ENGINES else row["rss_self_kb"]
+    Forked engines (gm/im/vips-cli): peak RSS of the child. Genuine per-image figure,
+    since every rep forks a fresh process the kernel accounts for separately.
+
+    In-process libvips: peak of libvips' own vips_tracked_get_mem(). NOT rss_self, which
+    is unusable here - glibc does not return freed memory to the OS, so the first case
+    grows the JVM's RSS and every later case baselines at that elevated level, reuses the
+    same free lists and reads ~0. That is a measurement artifact, not low memory use."""
+    kb = row["rss_children_kb"] if row["engine"] in SUBPROCESS_ENGINES else row["vips_tracked_peak_kb"]
     return kb / 1024.0 if kb is not None and kb >= 0 else None
 
 
@@ -238,7 +243,7 @@ def annotate_bars(ax, rects, unit="s", font_size=8.5):
         h = rect.get_height()
         if h <= 0:
             continue
-        text = f"{h:.3f}{unit}" if unit == "s" else f"{h:.0f}{unit}"
+        text = f"{h:.3f}{unit}" if unit == "s" else f"{h:.1f}{unit}"
         ax.annotate(text, xy=(rect.get_x() + rect.get_width() / 2, h),
                     xytext=(0, 4), textcoords="offset points",
                     ha="center", va="bottom", fontsize=font_size, fontweight="bold")
@@ -324,7 +329,7 @@ def rss_chart(grouped, source, out_path):
         _, vips = pick(by_engine, LIBVIPS_ENGINES)
         if base is None or vips is None:
             continue
-        b_mb, v_mb = attributable_rss_mb(base), attributable_rss_mb(vips)
+        b_mb, v_mb = attributable_memory_mb(base), attributable_memory_mb(vips)
         if b_mb is None or v_mb is None:
             continue
         ops.append(op)
@@ -342,18 +347,20 @@ def rss_chart(grouped, source, out_path):
     r2 = ax.bar(x + width / 2, vips_vals, width, color=COLOR_VIPS,
                 capsize=4, edgecolor="black", linewidth=0.5)
 
-    ax.set_title(f"Peak memory per operation\nSource: {source}", fontsize=13, fontweight="bold", pad=14)
+    ax.set_title(f"Peak memory per operation (different metric per engine)\nSource: {source}", fontsize=13, fontweight="bold", pad=14)
     ax.set_xticks(x)
-    ax.set_xticklabels([f"{short_label(op)}\n{b / v:.2f}x less" if v else short_label(op)
-                        for op, b, v in zip(ops, base_vals, vips_vals)], fontsize=9)
-    apply_scale(ax, base_vals + vips_vals, "Peak RSS attributable to the engine (MB)")
+    # Deliberately NO "Nx less" here, unlike the time chart. These two bars are different
+    # quantities - a whole child process' RSS versus libvips' tracked image buffers - so their
+    # ratio is not a memory saving and must not be presented as one.
+    ax.set_xticklabels([short_label(op) for op in ops], fontsize=9)
+    apply_scale(ax, base_vals + vips_vals, "Peak memory attributable to the engine (MB)")
     annotate_bars(ax, r1, unit="MB")
     annotate_bars(ax, r2, unit="MB")
     # The legend carries the "these are two different quantities" caveat, so it travels
     # with the chart without needing a corner note.
     ax.legend(handles=[mpatches.Patch(facecolor=c, label=l, edgecolor="black", linewidth=0.5)
                        for c, l in [(COLOR_GM, "GM/IM: peak RSS of the forked child process"),
-                                    (COLOR_VIPS, "libvips: peak RSS added inside the JVM")]],
+                                    (COLOR_VIPS, "libvips: peak vips_tracked_get_mem() in-process")]],
               fontsize=9, frameon=True, facecolor="white", edgecolor="none")
     fig.tight_layout()
     fig.savefig(out_path, dpi=200)
