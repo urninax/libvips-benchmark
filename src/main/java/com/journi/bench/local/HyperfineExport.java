@@ -45,6 +45,7 @@ final class HyperfineExport {
         List<Double> warmupSeconds,
         long rssSelfKb,
         long rssChildrenKb,
+        long vipsTrackedPeakKb,
         long outputBytes
     ) {}
 
@@ -103,22 +104,28 @@ final class HyperfineExport {
 
         // extended table
         sb.append("\n#### ").append(title).append(" — extended\n\n");
-        sb.append("| Command | Engine | Median [ms] | MAD [ms] | n | rssSelf [MB] | rssChildren [MB] | out [KB] |\n");
-        sb.append("|:---|:---|---:|---:|---:|---:|---:|---:|\n");
+        sb.append("| Command | Engine | Median [ms] | MAD [ms] | n | vipsPeak [MB] | rssChildren [MB] | rssSelf [MB] | out [KB] |\n");
+        sb.append("|:---|:---|---:|---:|---:|---:|---:|---:|---:|\n");
         for (CaseResult r : results) {
             List<Double> sorted = new ArrayList<>(r.seconds());
             sorted.sort(Double::compareTo);
             double median = Stats.percentile(sorted, 0.50);
-            sb.append(String.format(Locale.ROOT, "| `%s` | %s | %s | %s | %d | %s | %s | %s |%n",
+            sb.append(String.format(Locale.ROOT, "| `%s` | %s | %s | %s | %d | %s | %s | %s | %s |%n",
                 r.name(), r.engine(),
                 fmt(median * 1000, 1), fmt(mad(sorted, median) * 1000, 1), r.seconds().size(),
-                kbToMb(r.rssSelfKb()), kbToMb(r.rssChildrenKb()),
+                kbToMb(r.vipsTrackedPeakKb()), kbToMb(r.rssChildrenKb()), kbToMb(r.rssSelfKb()),
                 r.outputBytes() < 0 ? "n/a" : fmt(r.outputBytes() / 1024.0, 0)));
         }
         sb.append("\nMedian/MAD are the robust summary — the distribution is a hard lower bound with a\n");
-        sb.append("one-sided tail of interference, so mean±sd overstates spread. rssSelf is the JVM's own\n");
-        sb.append("peak (baseline-subtracted, meaningful for the in-process vips rows); rssChildren is the\n");
-        sb.append("summed peak of forked gm/convert processes. They are different quantities — never add them.\n");
+        sb.append("one-sided tail of interference, so mean±sd overstates spread.\n\n");
+        sb.append("MEMORY COLUMNS ARE DIFFERENT QUANTITIES — never add or directly compare them:\n");
+        sb.append("- `vipsPeak`: peak of libvips' own vips_tracked_get_mem() during the case. The\n");
+        sb.append("  meaningful number for in-process vips rows. Undercounts codec-internal scratch.\n");
+        sb.append("- `rssChildren`: peak RSS of the forked gm/convert child. The meaningful number\n");
+        sb.append("  for GM/IM rows, and a genuine per-image figure since every rep forks fresh.\n");
+        sb.append("- `rssSelf`: JVM RSS growth over a pre-case baseline. UNRELIABLE for any case\n");
+        sb.append("  after the first — glibc does not return freed memory to the OS, so later cases\n");
+        sb.append("  reuse existing free lists and read ~0. Kept only as a diagnostic.\n");
         return sb.toString();
     }
 
@@ -151,6 +158,7 @@ final class HyperfineExport {
             sb.append("      \"max\": ").append(num(s.max())).append(",\n");
             sb.append("      \"rss_self_kb\": ").append(r.rssSelfKb()).append(",\n");
             sb.append("      \"rss_children_kb\": ").append(r.rssChildrenKb()).append(",\n");
+            sb.append("      \"vips_tracked_peak_kb\": ").append(r.vipsTrackedPeakKb()).append(",\n");
             sb.append("      \"output_bytes\": ").append(r.outputBytes()).append(",\n");
             sb.append("      \"times\": ").append(numArray(r.seconds())).append(",\n");
             sb.append("      \"warmup_times\": ").append(numArray(r.warmupSeconds())).append(",\n");

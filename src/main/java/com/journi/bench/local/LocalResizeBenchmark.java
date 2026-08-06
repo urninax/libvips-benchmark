@@ -185,6 +185,16 @@ public final class LocalResizeBenchmark {
         samplerThread.setDaemon(true);
         samplerThread.start();
 
+        // libvips' own allocation counter - the only per-case-meaningful memory number for the
+        // in-process rows (see VipsTrackedMemory for why RSS cannot be one).
+        VipsTrackedMemory vipsMem = new VipsTrackedMemory(RSS_SAMPLE_INTERVAL_MS);
+        Thread vipsMemThread = new Thread(vipsMem, "vips-mem-sampler");
+        vipsMemThread.setDaemon(true);
+        vipsMemThread.start();
+        if (!VipsTrackedMemory.available()) {
+            System.out.println("NOTE: vips_tracked_get_mem() did not resolve — vipsPeak will read n/a.");
+        }
+
         String iccStr = icc.toString();
 
         // ---- standard resize cases ----
@@ -291,7 +301,7 @@ public final class LocalResizeBenchmark {
         var sourceInfo = new HyperfineExport.SourceInfo(
             src, srcExt, srcW, srcH, Files.size(Path.of(src)), iccBytes);
 
-        List<HyperfineExport.CaseResult> standardResults = measureAll(standard, warmup, measured, rss, procAvailable);
+        List<HyperfineExport.CaseResult> standardResults = measureAll(standard, warmup, measured, rss, vipsMem, procAvailable);
         HyperfineExport.write(formatDir.resolve("standard_resize_ffm.md"),
             formatDir.resolve("standard_resize_ffm.json"), sourceInfo, "Standard resize", standardResults);
         System.out.println();
@@ -300,13 +310,14 @@ public final class LocalResizeBenchmark {
         System.out.println();
         System.out.println("Bleed case — content " + dim(orig) + ", bleed " + BLEED_PX
             + "px/edge, full canvas " + bleedLabel);
-        List<HyperfineExport.CaseResult> bleedResults = measureAll(bleed, warmup, measured, rss, procAvailable);
+        List<HyperfineExport.CaseResult> bleedResults = measureAll(bleed, warmup, measured, rss, vipsMem, procAvailable);
         HyperfineExport.write(formatDir.resolve("bleed_resize_ffm.md"),
             formatDir.resolve("bleed_resize_ffm.json"), sourceInfo, "Bleed resize", bleedResults);
         System.out.println();
         System.out.println("== Bleed resize results written to " + formatDir.resolve("bleed_resize_ffm.md") + " ==");
 
         rss.stop();
+        vipsMem.stop();
 
         List<HyperfineExport.CaseResult> all = new ArrayList<>(standardResults);
         all.addAll(bleedResults);
@@ -319,12 +330,13 @@ public final class LocalResizeBenchmark {
     // ---- measurement -------------------------------------------------------
 
     private static List<HyperfineExport.CaseResult> measureAll(List<LocalCase> cases, int warmup, int measured,
-                                                               RssSampler rss, boolean procAvailable) throws Exception {
+                                                               RssSampler rss, VipsTrackedMemory vipsMem,
+                                                               boolean procAvailable) throws Exception {
         List<HyperfineExport.CaseResult> out = new ArrayList<>();
         int i = 0;
         for (LocalCase c : cases) {
             System.out.printf(Locale.ROOT, "Benchmark %d: %s%n", ++i, c.name());
-            out.add(measure(c, warmup, measured, rss, procAvailable));
+            out.add(measure(c, warmup, measured, rss, vipsMem, procAvailable));
             HyperfineExport.CaseResult r = out.get(out.size() - 1);
             var s = com.journi.bench.harness.Stats.summarize(r.seconds());
             System.out.printf(Locale.ROOT, "  Time (mean ± σ):  %8.1f ms ± %5.1f ms    Range: %.1f … %.1f ms  (%d runs)%n%n",
@@ -334,7 +346,8 @@ public final class LocalResizeBenchmark {
     }
 
     private static HyperfineExport.CaseResult measure(LocalCase c, int warmup, int measured,
-                                                      RssSampler rss, boolean procAvailable) throws Exception {
+                                                      RssSampler rss, VipsTrackedMemory vipsMem,
+                                                      boolean procAvailable) throws Exception {
         List<Double> warmupTimes = new ArrayList<>();
         for (int i = 0; i < warmup; i++) {
             long t0 = System.nanoTime();
@@ -349,6 +362,7 @@ public final class LocalResizeBenchmark {
         Thread.sleep(50);
         long baselineSelfKb = rss.currentSelfKb();
         rss.resetPeaks();
+        vipsMem.resetPeak();
 
         List<Double> times = new ArrayList<>();
         for (int i = 0; i < measured; i++) {
@@ -373,7 +387,8 @@ public final class LocalResizeBenchmark {
             if (Files.isRegularFile(c.output())) outBytes = Files.size(c.output());
         } catch (IOException ignored) {
         }
-        return new HyperfineExport.CaseResult(c.name(), c.engine(), times, warmupTimes, selfKb, childrenKb, outBytes);
+        return new HyperfineExport.CaseResult(c.name(), c.engine(), times, warmupTimes,
+            selfKb, childrenKb, vipsMem.peakKb(), outBytes);
     }
 
     /**
