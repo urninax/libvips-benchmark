@@ -221,18 +221,16 @@ def short_label(operation):
 
 
 def apply_scale(ax, values, base_ylabel):
-    """A run spanning e.g. 0.05s to 2.2s is unreadable on a linear axis - the fast bars
-    collapse to nothing. Switch to log only when the spread actually demands it, and say
-    so on the axis so nobody misreads bar heights as proportional."""
-    positive = [v for v in values if v > 0]
-    if positive and max(positive) / min(positive) > 20:
-        ax.set_yscale("log")
-        ax.set_ylim(min(positive) * 0.45, max(positive) * 2.6)
-        ax.set_ylabel(base_ylabel + " — LOG SCALE", fontsize=11, fontweight="bold")
-        return True
+    """Always LINEAR, always zero-based, so bar height is directly proportional to the
+    value: a bar for 3x the time is 3x as tall.
+
+    An earlier version switched to a log axis when the spread got wide (the 2.2s IM bleed
+    case next to a 0.05s thumbnail). That made short bars legible but broke the one thing a
+    bar chart is for - on a log axis a 3x difference is not a 3x difference in height, and
+    a reader comparing bars by eye gets the wrong answer. The value is printed above every
+    bar, so a short bar is still readable; a misleading one is not fixable."""
     ax.set_ylim(0, max(values) * 1.18)
     ax.set_ylabel(base_ylabel, fontsize=11, fontweight="bold")
-    return False
 
 
 def annotate_bars(ax, rects, unit="s", font_size=8.5):
