@@ -111,6 +111,29 @@ ORIG_W="${ORIG%%x*}";   ORIG_H="${ORIG##*x}"
 echo "Computed targets — thumb:${THUMB}  mobileFull:${FULL}  original:${ORIG}"
 echo
 
+# HEIC/AVIF decoding escapes the thread pins this script sets at the top, so such a
+# run is only comparable against another run with the SAME cpu allocation.
+# libheif/libde265 runs its own HEVC decoder thread pool that OMP_NUM_THREADS,
+# MAGICK_THREAD_LIMIT and VIPS_CONCURRENCY do not reach. Verified with all three set
+# to 1: the same 3024x4032 HEIC gives vips real=0.28s/user=0.64s and gm
+# real=0.40s/user=0.75s (user ~2x wall = multiple threads), while identical operations
+# on a JPEG source stay strictly single-threaded (real=0.11s/user=0.09s).
+case "$SRC_FORMAT" in
+  heic|heif|avif)
+    cat >&2 <<'WARN'
+WARNING: HEIC/AVIF source — the thread pins above do NOT reach the decoder.
+  libheif/libde265 runs its own HEVC decoder thread pool; OMP_NUM_THREADS,
+  MAGICK_THREAD_LIMIT and VIPS_CONCURRENCY have no effect on it, for GM/IM and vips.
+  * These timings scale with however many CPUs the container/taskset allows. Only
+    compare them against runs with the SAME allocation - running this under
+    `taskset -c 0` versus `--cpuset-cpus=0-3` shifted EVERY command by a constant
+    ~280ms, which is one fixed decode getting cheaper, not a per-operation speedup.
+  * Unlike the JPEG rows, this does NOT model one single-threaded worker per image.
+WARN
+    echo >&2
+    ;;
+esac
+
 # ============================================================================
 # PART 1 — Standard (non-bleed) resize: GraphicsMagick vs libvips
 #   This project uses GM (not IM) for every non-bleed resize.

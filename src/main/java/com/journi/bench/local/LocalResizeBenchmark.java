@@ -137,12 +137,16 @@ public final class LocalResizeBenchmark {
         // timed region, which would hand GM an extra fork+exec per iteration that the bash script
         // never pays, and would break the hyperfine cross-check.
         int srcW, srcH, iccBytes;
+        String srcLoader;
         try (Arena arena = Arena.ofConfined()) {
             VImage probe = VImage.newFromFile(arena, src);
             srcW = probe.getWidth();
             srcH = probe.getHeight();
             VBlob embedded = probe.getBlob("icc-profile-data");
             iccBytes = embedded == null ? -1 : embedded.getBytes().length;
+            // Loader name rather than file extension: .HEIC/.heif/.avif all route through
+            // heifload, and an extension can lie.
+            srcLoader = probe.getString("vips-loader");
         }
 
         int[] thumb = minFit(srcW, srcH, 320, 320);
@@ -173,6 +177,7 @@ public final class LocalResizeBenchmark {
             System.out.println("NOTE: the 'original' case is NOT a downscale for this source "
                 + "(16.7MP budget >= " + srcW + "x" + srcH + "), so it measures decode + re-encode only.");
         }
+        warnIfThreadPinsDoNotApply(srcLoader, concurrency);
         System.out.println();
 
         boolean procAvailable = Files.isDirectory(Path.of("/proc/self"));
@@ -333,6 +338,32 @@ public final class LocalResizeBenchmark {
 
         System.out.println();
         System.out.println("Charts:  python3 tools/plot_benchmarks.py " + formatDir);
+    }
+
+    /**
+     * HEIC/AVIF decoding escapes every thread pin this benchmark relies on, so a run against one
+     * is only comparable to another run with the SAME cpuset.
+     *
+     * libheif/libde265 runs its own HEVC decoder thread pool, and none of VIPS_CONCURRENCY,
+     * OMP_NUM_THREADS or MAGICK_THREAD_LIMIT reaches it. Verified: with all three pinned to 1, the
+     * same 3024x4032 HEIC gives vips real=0.28s / user=0.64s and gm real=0.40s / user=0.75s - user
+     * time ~2x wall time, i.e. several threads - while the identical operations on a JPEG source
+     * stay strictly single-threaded (real=0.11s / user=0.09s).
+     *
+     * Consequence seen for real: the same HEIC test run at `taskset -c 0` versus
+     * `--cpuset-cpus=0-3` differed by a near-constant ~280ms on EVERY command, GM and IM included
+     * - one fixed decode getting cheaper with more cores, not any per-operation speedup.
+     */
+    private static void warnIfThreadPinsDoNotApply(String loader, String concurrency) {
+        if (loader == null || !loader.toLowerCase(Locale.ROOT).startsWith("heif")) return;
+        System.out.println();
+        System.out.println("WARNING: HEIC/AVIF source (vips-loader=" + loader + ") — the thread pins do NOT reach the decoder.");
+        System.out.println("  libheif/libde265 runs its own HEVC decoder thread pool. VIPS_CONCURRENCY=" + concurrency
+            + ", OMP_NUM_THREADS and MAGICK_THREAD_LIMIT have no effect on it, for GM/IM and vips alike.");
+        System.out.println("  * These timings scale with the container's cpuset. Only compare them against runs");
+        System.out.println("    with the SAME --cpuset-cpus; container-level pinning is the only lever that works.");
+        System.out.println("  * Unlike the JPEG rows, this does NOT model one single-threaded worker per image —");
+        System.out.println("    under a real cores*2 worker pool those decoder threads would contend for cores.");
     }
 
     // ---- measurement -------------------------------------------------------
