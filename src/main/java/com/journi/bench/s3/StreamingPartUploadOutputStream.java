@@ -4,6 +4,7 @@ import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.*;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.lang.foreign.MemorySegment;
@@ -31,7 +32,24 @@ public final class StreamingPartUploadOutputStream implements AutoCloseable {
     private final String key;
     private final long partSizeBytes;
 
-    private ByteArrayOutputStream buffer;
+    /**
+     * Exposes the backing array so a full part can be uploaded without a defensive
+     * toByteArray() copy - see writeSegment()'s doc for why the copy count matters here.
+     * Safe because every read of buf()/count() below is immediately followed by either an
+     * upload of that exact range or a reset(), all on the single thread libvips writes from.
+     */
+    private static final class ExposedByteArrayOutputStream extends ByteArrayOutputStream {
+        ExposedByteArrayOutputStream(int size) { super(size); }
+        byte[] backingArray() { return buf; }
+        int size0() { return count; }
+    }
+
+    private final ExposedByteArrayOutputStream buffer;
+    /**
+     * Reused across callbacks so the write path allocates nothing per call. Grows on demand;
+     * libvips' target buffer is 8500 bytes, so in practice it is sized once and never again.
+     */
+    private byte[] scratch = new byte[16 * 1024];
     private String uploadId;
     private final List<CompletedPart> completedParts = new ArrayList<>();
     private int nextPartNumber = 1;
@@ -43,14 +61,27 @@ public final class StreamingPartUploadOutputStream implements AutoCloseable {
         this.bucket = bucket;
         this.key = key;
         this.partSizeBytes = partSizeBytes;
-        this.buffer = new ByteArrayOutputStream((int) Math.min(partSizeBytes, Integer.MAX_VALUE));
+        this.buffer = new ExposedByteArrayOutputStream((int) Math.min(partSizeBytes, Integer.MAX_VALUE));
     }
 
-    /** Called from the VCustomTarget WriteCallback. seg is already sliced to its exact length by the library. */
+    /**
+     * Called from the VCustomTarget WriteCallback. seg is already sliced to its exact length by
+     * the library.
+     * <p>
+     * Copies via a reused scratch array rather than seg.toArray(), which allocated a fresh byte[]
+     * on EVERY callback. libvips flushes its target in ~8500-byte chunks, so a 1.7MB bleed output
+     * produced ~200 short-lived arrays per job - times queue size, times reps. That garbage is
+     * exactly what the gc columns were reporting: the str-output rows showed 99ms of GC pause
+     * against 0ms for the equivalent buffered-output row, while being 0.5-1% slower for no
+     * reason connected to streaming.
+     */
     public long writeSegment(MemorySegment seg) throws IOException {
         int n = (int) seg.byteSize();
-        byte[] chunk = seg.toArray(ValueLayout.JAVA_BYTE);
-        buffer.write(chunk);
+        if (n > scratch.length) {
+            scratch = new byte[Integer.highestOneBit(n - 1) << 1];
+        }
+        MemorySegment.copy(seg, ValueLayout.JAVA_BYTE, 0L, scratch, 0, n);
+        buffer.write(scratch, 0, n);
         totalBytesWritten += n;
         if (buffer.size() >= partSizeBytes) {
             flushAsPart();
@@ -64,14 +95,16 @@ public final class StreamingPartUploadOutputStream implements AutoCloseable {
                 CreateMultipartUploadRequest.builder().bucket(bucket).key(key).build());
             uploadId = createResp.uploadId();
         }
-        byte[] partBytes = buffer.toByteArray();
+        // Stream straight off the backing array - toByteArray() here was a third full copy of
+        // every part, on top of the per-callback array and the copy into this buffer.
+        int len = buffer.size0();
         UploadPartResponse resp = s3.uploadPart(
             UploadPartRequest.builder()
                 .bucket(bucket).key(key).uploadId(uploadId)
                 .partNumber(nextPartNumber)
-                .contentLength((long) partBytes.length)
+                .contentLength((long) len)
                 .build(),
-            RequestBody.fromBytes(partBytes));
+            RequestBody.fromInputStream(new ByteArrayInputStream(buffer.backingArray(), 0, len), len));
         completedParts.add(CompletedPart.builder().partNumber(nextPartNumber).eTag(resp.eTag()).build());
         nextPartNumber++;
         buffer.reset();
@@ -81,11 +114,12 @@ public final class StreamingPartUploadOutputStream implements AutoCloseable {
     public void finish() throws IOException {
         if (uploadId == null) {
             // Fast path: buffer never crossed the threshold - single sized PutObject,
-            // avoiding 3 round trips for what is, in practice, almost every job.
-            byte[] all = buffer.toByteArray();
+            // avoiding 3 round trips for what is, in practice, almost every job. Same
+            // no-extra-copy treatment as flushAsPart().
+            int len = buffer.size0();
             s3.putObject(
-                PutObjectRequest.builder().bucket(bucket).key(key).contentLength((long) all.length).build(),
-                RequestBody.fromBytes(all));
+                PutObjectRequest.builder().bucket(bucket).key(key).contentLength((long) len).build(),
+                RequestBody.fromInputStream(new ByteArrayInputStream(buffer.backingArray(), 0, len), len));
         } else {
             if (buffer.size() > 0) {
                 flushAsPart(); // final part, may be smaller than partSizeBytes - S3 allows that for the last part

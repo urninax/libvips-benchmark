@@ -23,7 +23,7 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Variant B: vips-ffm. Implements the full B0-B3 grid via a Mode enum, so the
@@ -54,7 +54,10 @@ public final class VipsStreamingVariant implements Variant {
     private static final long BLEED_CONTENT_TARGET_PIXELS = 16_777_216L;
     private static final int BLEED_PX = 36;
     private static final int READ_SCRATCH_SIZE = 256 * 1024;
-    private static Boolean readCallbackDebug;
+    // Instance state, NOT static: every variant in a sweep shares one classloader, so a static
+    // flag written from an instance setUp() is cross-variant global state, and the hot read
+    // callback would unbox a null Boolean into an NPE for any variant whose setUp() never ran.
+    private boolean readCallbackDebug;
 
     private final S3Client s3;
     private final String bucket;
@@ -103,8 +106,7 @@ public final class VipsStreamingVariant implements Variant {
     @Override
     public JobResult process(String sourceKey, String destKey) {
         long t0 = System.nanoTime();
-        AtomicReference<Long> fetchNanos = new AtomicReference<>(0L);
-        AtomicReference<Long> uploadNanos = new AtomicReference<>(0L);
+        long fetchNanos = 0, uploadNanos = 0;
         long bytesIn = 0, bytesOut = 0;
         int outW = 0, outH = 0;
 
@@ -117,19 +119,25 @@ public final class VipsStreamingVariant implements Variant {
 
             VSource vsrc = null;
             byte[] bufferedInput = null;
+            // Fetch is timed as a wall-clock SPAN (first byte requested -> last byte handed to
+            // libvips), NOT as a sum of intervals spent blocked inside read(). Summing blocked
+            // reads made overlapRatio structurally incapable of measuring the thing it exists to
+            // measure: once the kernel socket buffer holds the response, read() returns
+            // immediately, so an object that spent 115ms on the wire concurrently with decoding
+            // registered as ~0ms of "fetch" and the ratio sat at 1.00-1.01 even on runs where
+            // streaming was demonstrably saving ~100ms/job (visible only as higher cpu%). The
+            // buffered branch's fetch is already a contiguous span, so both branches now measure
+            // the same quantity - and a span that extends past procStart is exactly what makes
+            // the fetch+process+upload sum exceed total, i.e. real overlap.
+            long fetchSpanStart = System.nanoTime();
+            AtomicLong lastReadEndNanos = new AtomicLong(0);
+            AtomicLong bytesReadAcc = new AtomicLong(0);
             if (streamFetch) {
-                long fs = System.nanoTime();
                 var getResponse = s3.getObject(GetObjectRequest.builder().bucket(bucket).key(sourceKey).build());
                 // getObject() blocks for the connection + response-header round-trip before
-                // returning - that's real fetch cost (one latency hop), but was previously
-                // invisible to fetchNanos, which only started accumulating time inside the
-                // read callback below. Buffered fetch times its "fetch" as one continuous span
-                // starting here (see the else branch), so credit this span the same way -
-                // otherwise streamed fetch silently understates its own cost as pure latency
-                // grows, which pulls the overlap ratio below 1.0 even when genuine I/O/compute
-                // overlap is happening (visible instead in higher CPU utilization).
-                fetchNanos.set(System.nanoTime() - fs);
-                vsrc = new VCustomSource(arena, readCallback(getResponse, fetchNanos));
+                // returning - real fetch cost (one latency hop), and part of the span above.
+                lastReadEndNanos.set(System.nanoTime());
+                vsrc = new VCustomSource(arena, readCallback(getResponse, lastReadEndNanos, bytesReadAcc));
                 // The read callback only closes the S3 response stream when it observes EOF
                 // (n <= 0). libvips isn't guaranteed to read a source down to true EOF (e.g. it
                 // may stop once it has enough data to decode/thumbnail), which would otherwise
@@ -144,13 +152,12 @@ public final class VipsStreamingVariant implements Variant {
                     }
                 });
             } else {
-                long fs = System.nanoTime();
                 try (InputStream in = s3.getObject(GetObjectRequest.builder().bucket(bucket).key(sourceKey).build())) {
                     ByteArrayOutputStream buf = new ByteArrayOutputStream();
                     in.transferTo(buf);
                     bufferedInput = buf.toByteArray();
                 }
-                fetchNanos.set(System.nanoTime() - fs);
+                fetchNanos = System.nanoTime() - fetchSpanStart;
                 bytesIn = bufferedInput.length;
             }
 
@@ -163,6 +170,15 @@ public final class VipsStreamingVariant implements Variant {
             outW = (int) processed.getWidth();
             outH = (int) processed.getHeight();
 
+            if (streamFetch) {
+                // Close the span at the last read the loader actually performed. Deliberately not
+                // procEnd: libvips may stop reading well before it finishes computing, and
+                // charging the remaining compute time to "fetch" would manufacture overlap that
+                // isn't there.
+                fetchNanos = Math.max(0, lastReadEndNanos.get() - fetchSpanStart);
+                bytesIn = bytesReadAcc.get();
+            }
+
             if (streamPut) {
                 long us = System.nanoTime();
                 try (StreamingPartUploadOutputStream upload =
@@ -171,7 +187,7 @@ public final class VipsStreamingVariant implements Variant {
                     saveToTarget(processed, vtgt);
                     bytesOut = upload.totalBytesWritten();
                 }
-                uploadNanos.set(System.nanoTime() - us);
+                uploadNanos = System.nanoTime() - us;
             } else {
                 long us = System.nanoTime();
                 VTarget memTarget = VTarget.newToMemory(arena);
@@ -181,12 +197,12 @@ public final class VipsStreamingVariant implements Variant {
                 s3.putObject(
                     PutObjectRequest.builder().bucket(bucket).key(destKey).contentLength((long) outBytes.length).build(),
                     RequestBody.fromBytes(outBytes));
-                uploadNanos.set(System.nanoTime() - us);
+                uploadNanos = System.nanoTime() - us;
             }
 
             long total = System.nanoTime() - t0;
             return new JobResult(sourceKey, true, null, total,
-                fetchNanos.get(), procEnd - procStart, uploadNanos.get(),
+                fetchNanos, procEnd - procStart, uploadNanos,
                 bytesIn, bytesOut, outW, outH);
         } catch (Exception e) {
             return JobResult.failure(sourceKey, e.toString(), System.nanoTime() - t0);
@@ -279,13 +295,39 @@ public final class VipsStreamingVariant implements Variant {
             VipsOption.Enum("access", VipsAccess.ACCESS_SEQUENTIAL),
             VipsOption.Enum("fail-on", VipsFailOn.FAIL_ON_ERROR));
         int[] target = GmStandardVariant.areaFit((int) source.getWidth(), (int) source.getHeight(), TARGET_PIXELS);
-        return source
+        // ICC AFTER the resize, not before - see iccAfterResize()'s doc. This branch used to
+        // colour-transform at full source resolution, which is 4x the pixels of the 2.25MP output
+        // and was single-handedly responsible for streamed fetch losing this operation.
+        return iccAfterResize(source
             .autorot()
-            .iccTransform("srgb", VipsOption.String("input-profile", iccProfilePath))
             .thumbnailImage(
                 target[0],
                 VipsOption.Int("height", target[1]),
-                VipsOption.Enum("size", VipsSize.SIZE_FORCE));
+                VipsOption.Enum("size", VipsSize.SIZE_FORCE)));
+    }
+
+    /**
+     * Colour-manages to sRGB AFTER the resize has already reduced the pixel count.
+     * <p>
+     * This is what libvips' own thumbnail does internally: the buffered branches pass
+     * import-profile/export-profile to thumbnailBuffer, and thumbnail applies colour management
+     * downstream of its resize, so it only ever transforms output-sized pixels. The streamed
+     * branches previously called iccTransform() on the freshly-loaded, full-resolution source
+     * before handing it to thumbnailImage, so they paid the transform at source resolution.
+     * <p>
+     * Measured on the 2268x4032 (9.14MP) fixtures, purely in-memory with no network involved:
+     * standard resize 153.2ms -> 77.3ms (buffered thumbnailBuffer is 78.1ms, i.e. exact parity),
+     * bleed 124.1ms -> 112.0ms. The reorder is pixel-identical - max absolute channel difference
+     * between the two orderings is 0.0 - so this is free.
+     * <p>
+     * The asymmetry this explains: bleed's content target is areaFit(source, 16MP), and a 9.14MP
+     * source clamps that scale to 1.0, so content dimensions EQUAL source dimensions and both
+     * orderings transformed the same 9.14MP either way (~0 delta). Standard resize outputs 2.25MP,
+     * so the mis-ordering cost 4x there. That, not streaming, was the whole difference between
+     * "streaming helps bleed" and "streaming hurts standard resize".
+     */
+    private VImage iccAfterResize(VImage resized) throws VipsError {
+        return resized.iccTransform("srgb", VipsOption.String("input-profile", iccProfilePath));
     }
 
     /**
@@ -328,12 +370,14 @@ public final class VipsStreamingVariant implements Variant {
             VipsOption.Enum("fail-on", VipsFailOn.FAIL_ON_ERROR));
         int[] content = GmStandardVariant.areaFit((int) source.getWidth(), (int) source.getHeight(), BLEED_CONTENT_TARGET_PIXELS);
         int fullW = content[0] + 2 * BLEED_PX, fullH = content[1] + 2 * BLEED_PX;
-        VImage contentImg = source
+        // ICC after the resize and before the embed - matching the buffered branch above, which
+        // gets its colour management inside thumbnailBuffer (i.e. post-resize) and only then
+        // mirrors the bleed border out of already-transformed pixels. See iccAfterResize()'s doc.
+        VImage contentImg = iccAfterResize(source
             .autorot()
-            .iccTransform("srgb", VipsOption.String("input-profile", iccProfilePath))
             .thumbnailImage(content[0],
                 VipsOption.Int("height", content[1]),
-                VipsOption.Enum("crop", VipsInteresting.INTERESTING_CENTRE));
+                VipsOption.Enum("crop", VipsInteresting.INTERESTING_CENTRE)));
         return contentImg.embed(BLEED_PX, BLEED_PX, fullW, fullH,
             VipsOption.Enum("extend", VipsExtend.EXTEND_MIRROR));
     }
@@ -345,14 +389,19 @@ public final class VipsStreamingVariant implements Variant {
      * measured reps - exactly the GC noise the GcSampler metric is meant to
      * surface). single read(), not readNBytes(): 0 return means EOF to libvips,
      * -1 means error - NOT the same as a short read.
+     * <p>
+     * Records the wall-clock instant each read COMPLETED (rather than accumulating time spent
+     * blocked inside read()) and the running byte count, so process() can close out the fetch span
+     * and report a real bytesIn for the streamed branches - see the span comment in process().
      */
-    private static VCustomSource.ReadCallback readCallback(InputStream in, AtomicReference<Long> fetchNanosAcc) {
+    private VCustomSource.ReadCallback readCallback(InputStream in, AtomicLong lastReadEndNanos,
+                                                    AtomicLong bytesReadAcc) {
         byte[] scratch = new byte[READ_SCRATCH_SIZE];
         AtomicInteger callCount = new AtomicInteger(0);
+        boolean debug = readCallbackDebug;
         return (MemorySegment dataPointer, long length) -> {
             int call = callCount.incrementAndGet();
-            if (readCallbackDebug && (call % 10 == 0)) System.err.println("[callback] read call #" + call + ", want " + length + " bytes");
-            long ioStart = System.nanoTime();
+            if (debug && (call % 10 == 0)) System.err.println("[callback] read call #" + call + ", want " + length + " bytes");
             try {
                 int want = (int) Math.min(length, scratch.length);
                 int n = in.read(scratch, 0, want);
@@ -361,11 +410,15 @@ public final class VipsStreamingVariant implements Variant {
                     return 0; // EOF
                 }
                 MemorySegment.copy(scratch, 0, dataPointer, ValueLayout.JAVA_BYTE, 0L, n);
+                bytesReadAcc.addAndGet(n);
                 return (long) n;
             } catch (IOException e) {
                 return -1L;
             } finally {
-                fetchNanosAcc.updateAndGet(v -> v + (System.nanoTime() - ioStart));
+                long now = System.nanoTime();
+                // Monotonic max, not a bare set: libvips may invoke this from more than one of its
+                // own worker threads, and a straggler finishing out of order must not rewind the span.
+                lastReadEndNanos.updateAndGet(prev -> Math.max(prev, now));
             }
         };
     }

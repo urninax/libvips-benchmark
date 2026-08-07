@@ -15,8 +15,11 @@ public final class ResultTable {
     // 6-digit RSS, a 4-digit percentile - silently drifted the columns apart.
     private static final String HEADER_FMT =
         "%-46s %7s %6s %9s %7s %11s %8s %7s %8s %10s %7s %5s %7s %8s %8s %8s %8s %8s %5s%n";
+    // vipsPeak is "%10s", NOT "%10.1s" - in a string conversion the ".1" is a PRECISION, i.e.
+    // "truncate to one character", so the column silently reported only the first digit of its
+    // own value ("523.4" printed as "5", "n/a" as "n") for every row.
     private static final String ROW_FMT =
-        "%-46s %7d %6d %9.2f %7.2f %11.2f %8.1f %7.1f %8.1f %10.1s %7.1f %5d %7d %8.2f %8.1f %8.1f %8.1f %8.1f %5d%s%n";
+        "%-46s %7d %6d %9.2f %7.2f %11.2f %8.1f %7.1f %8.1f %10s %7.1f %5d %7d %8.2f %8.1f %8.1f %8.1f %8.1f %5d%s%n";
 
     /** Prints the section table with its column-glossary footer. Called exactly twice per run (Main.run()'s two final section summaries) - Main.runVariant() no longer prints its own per-variant table, since these two calls already cover every variant. */
     public static void print(String sectionTitle, List<DrainStats> results) {
