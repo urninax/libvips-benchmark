@@ -49,8 +49,10 @@ public final class VipsStreamingVariant implements Variant {
     public enum Operation { STANDARD_RESIZE, BLEED_RESIZE }
 
     private static final long TARGET_PIXELS = 2_250_000L;
-    private static final int CONTENT_W = 2480, CONTENT_H = 3508, BLEED_PX = 36;
-    private static final int FULL_W = CONTENT_W + 2 * BLEED_PX, FULL_H = CONTENT_H + 2 * BLEED_PX;
+    // Bleed content is PictureFormat.originalFormat - an area-fit resize of the SOURCE's own
+    // aspect ratio, capped at 16MP - NOT a fixed page size. See bleedResize()'s doc.
+    private static final long BLEED_CONTENT_TARGET_PIXELS = 16_777_216L;
+    private static final int BLEED_PX = 36;
     private static final int READ_SCRATCH_SIZE = 256 * 1024;
     private static Boolean readCallbackDebug;
 
@@ -286,23 +288,53 @@ public final class VipsStreamingVariant implements Variant {
                 VipsOption.Enum("size", VipsSize.SIZE_FORCE));
     }
 
+    /**
+     * Content dimensions are an AREA-FIT of the SOURCE image's own aspect ratio (capped at 16MP,
+     * PictureFormat.originalFormat) - NOT a fixed page size. Confirmed against
+     * benchmark_resize.sh (generated from the real ImageMagickClient.scala/PictureFormat.scala,
+     * see ImBleedVariant's doc) and LocalResizeBenchmark.java's bleed case, which already computed
+     * this correctly. A prior version of this method hardcoded content at a fixed A4@300dpi guess,
+     * independent of the source - wrong, and it also silently hid the real cost of this operation:
+     * because that fixed target needed no source dimensions, BOTH fetch modes could reach the
+     * shrink-on-load thumbnail entry points for free. The real area-fit target can't be known
+     * until the source's actual width/height are read, which reproduces standardResize()'s own
+     * peek-vs-stream fork below - streamed fetch loses shrink-on-load here too, for the same
+     * reason it does there.
+     */
     private VImage bleedResize(Arena arena, VSource vsrc, byte[] bufferedInput) throws VipsError {
-        // CONTENT_W/CONTENT_H are fixed constants (unlike standardResize's
-        // area-fit target), so this needs no dimension peek at all - both fetch
-        // modes can go straight to the shrink-on-load-capable thumbnail entry
-        // point.
-        VImage content = bufferedInput != null
-            ? VImage.thumbnailBuffer(arena, VBlob.newFromBytes(arena, bufferedInput), CONTENT_W,
-                VipsOption.Int("height", CONTENT_H),
-                VipsOption.Enum("crop", VipsInteresting.INTERESTING_CENTRE),
-                VipsOption.String("export-profile", "srgb"),
-                VipsOption.String("import-profile", iccProfilePath))
-            : VImage.thumbnailSource(arena, vsrc, CONTENT_W,
-                VipsOption.Int("height", CONTENT_H),
+        if (bufferedInput != null) {
+            // Bytes already fully in memory, so a throwaway header-only peek costs nothing - the
+            // real work below still gets a fresh loader built with the shrink target known, so
+            // thumbnailBuffer can shrink-on-load. Mirrors standardResize()'s buffered path.
+            VImage peek = VImage.newFromSource(arena, VSource.newFromBytes(arena, bufferedInput),
+                VipsOption.Enum("access", VipsAccess.ACCESS_SEQUENTIAL));
+            int[] content = GmStandardVariant.areaFit((int) peek.getWidth(), (int) peek.getHeight(), BLEED_CONTENT_TARGET_PIXELS);
+            int fullW = content[0] + 2 * BLEED_PX, fullH = content[1] + 2 * BLEED_PX;
+            VImage contentImg = VImage.thumbnailBuffer(arena, VBlob.newFromBytes(arena, bufferedInput), content[0],
+                VipsOption.Int("height", content[1]),
                 VipsOption.Enum("crop", VipsInteresting.INTERESTING_CENTRE),
                 VipsOption.String("export-profile", "srgb"),
                 VipsOption.String("import-profile", iccProfilePath));
-        return content.embed(BLEED_PX, BLEED_PX, FULL_W, FULL_H,
+            return contentImg.embed(BLEED_PX, BLEED_PX, fullW, fullH,
+                VipsOption.Enum("extend", VipsExtend.EXTEND_MIRROR));
+        }
+
+        // Streamed fetch: a live, single-pass network stream can't be read twice - peeking the
+        // header to compute the area-fit content target and later reading pixels would both have
+        // to pull from the same vsrc/loader node. Same non-shrink-on-load thumbnailImage()
+        // fallback as standardResize()'s streamed branch, for the same reason.
+        VImage source = VImage.newFromSource(arena, vsrc,
+            VipsOption.Enum("access", VipsAccess.ACCESS_SEQUENTIAL),
+            VipsOption.Enum("fail-on", VipsFailOn.FAIL_ON_ERROR));
+        int[] content = GmStandardVariant.areaFit((int) source.getWidth(), (int) source.getHeight(), BLEED_CONTENT_TARGET_PIXELS);
+        int fullW = content[0] + 2 * BLEED_PX, fullH = content[1] + 2 * BLEED_PX;
+        VImage contentImg = source
+            .autorot()
+            .iccTransform("srgb", VipsOption.String("input-profile", iccProfilePath))
+            .thumbnailImage(content[0],
+                VipsOption.Int("height", content[1]),
+                VipsOption.Enum("crop", VipsInteresting.INTERESTING_CENTRE));
+        return contentImg.embed(BLEED_PX, BLEED_PX, fullW, fullH,
             VipsOption.Enum("extend", VipsExtend.EXTEND_MIRROR));
     }
 

@@ -137,7 +137,8 @@ public final class GmStandardVariant implements Variant {
         }
     }
 
-    private int[] identifyDims(Path file) throws IOException, InterruptedException {
+    /** Also used by ImBleedVariant - IM's real bleedOperation needs the source's actual dimensions too (see its doc). Uses GM's binary purely for a dimension read; interchangeable with IM's own `identify` for that. */
+    public static int[] identifyDims(Path file) throws IOException, InterruptedException {
         ProcessBuilder pb = new ProcessBuilder("gm", "identify", "-format", "%w %h", file.toString());
         pb.redirectErrorStream(true);
         Process p = pb.start();

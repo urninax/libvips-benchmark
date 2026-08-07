@@ -19,16 +19,26 @@ import java.util.List;
 
 /**
  * Variant A (bleed): ImageMagick fetch-then-process, mirroring
- * ImageMagickClient.buildCmd + bleedOperation exactly. Content 2480x3508
- * (A4@300dpi approximation), bleed 36px/edge (3mm @ 300dpi, ProductConstants.
- * DEFAULT_BLEED), full canvas 2552x3580.
+ * ImageMagickClient.buildCmd + bleedOperation exactly. Content is
+ * PictureFormat.originalFormat - an AREA-FIT resize preserving the SOURCE
+ * image's own aspect ratio, capped at 16 megapixels (4096x4096) - not a fixed
+ * page size. Bleed is a fixed 36px/edge (3mm @ 300dpi, ProductConstants.
+ * DEFAULT_BLEED) mirror-extend border added around that source-dependent
+ * content size.
+ *
+ * PREVIOUSLY WRONG: this hardcoded content at 2480x3508 (an A4@300dpi
+ * guess), independent of the source image entirely. benchmark_resize.sh -
+ * generated from the real ImageMagickClient.scala/PictureFormat.scala - shows
+ * the real bleed operation computes content as area_fit(16MP) against the
+ * SOURCE's actual width/height (its "ORIG" target), then adds the bleed
+ * border around THAT. LocalResizeBenchmark.java's bleed case already does
+ * this correctly (via GmStandardVariant.areaFit(srcW, srcH, 16_777_216L)) -
+ * this variant just hadn't been brought in line with it.
  */
 public final class ImBleedVariant implements Variant {
 
-    private static final int CONTENT_W = 2480, CONTENT_H = 3508;
+    private static final long CONTENT_TARGET_PIXELS = 16_777_216L; // PictureFormat.originalFormat, 4096x4096 cap
     private static final int BLEED_PX = 36;
-    private static final int FULL_W = CONTENT_W + 2 * BLEED_PX;
-    private static final int FULL_H = CONTENT_H + 2 * BLEED_PX;
     private static final long PROCESS_TIMEOUT_SECONDS = 30;
 
     private final S3Client s3;
@@ -87,9 +97,20 @@ public final class ImBleedVariant implements Variant {
             Files.write(inFile, full);
             long fetchEnd = System.nanoTime();
 
+            // NOTE ON THE PROCESS METRIC: identifyDims() is a second `gm identify` fork (GM's
+            // binary, not IM's - matches GmStandardVariant, and confirmed interchangeable for a
+            // pure dimension read), timed inside procStart/procEnd alongside the resize itself -
+            // same asymmetry as GmStandardVariant's own identify call, and for the same reason:
+            // the real bleedOperation needs the source's actual width/height to compute its
+            // area-fit content target BEFORE it can build the -resize geometry, so this isn't
+            // optional overhead, it's a real cost the production command pays too.
             long procStart = System.nanoTime();
+            int[] srcDims = GmStandardVariant.identifyDims(inFile);
+            int[] content = GmStandardVariant.areaFit(srcDims[0], srcDims[1], CONTENT_TARGET_PIXELS);
+            int fullW = content[0] + 2 * BLEED_PX;
+            int fullH = content[1] + 2 * BLEED_PX;
             outFile = ProcessRunner.tempFile(workDir, "im-out-", "." + outputFormat.ext);
-            ProcessRunner.run(bleedCommand(inFile, outFile), rssSampler, PROCESS_TIMEOUT_SECONDS);
+            ProcessRunner.run(bleedCommand(inFile, outFile, content[0], content[1], fullW, fullH), rssSampler, PROCESS_TIMEOUT_SECONDS);
             long procEnd = System.nanoTime();
 
             long uploadStart = System.nanoTime();
@@ -106,7 +127,7 @@ public final class ImBleedVariant implements Variant {
                 fetchEnd - fetchStart,
                 procEnd - procStart,
                 uploadEnd - uploadStart,
-                full.length, outLen, FULL_W, FULL_H);
+                full.length, outLen, fullW, fullH);
         } catch (Exception e) {
             return JobResult.failure(sourceKey, e.toString(), System.nanoTime() - t0);
         } finally {
@@ -123,13 +144,13 @@ public final class ImBleedVariant implements Variant {
         }
     }
 
-    private List<String> bleedCommand(Path in, Path out) {
+    private List<String> bleedCommand(Path in, Path out, int contentW, int contentH, int fullW, int fullH) {
         // Plain concatenation, NOT String.format - "%" here is IM's literal fx-expression
         // syntax and must NOT be doubled to "%%" (that would only be needed inside a
         // format string, which this isn't - single '%' is correct on the raw argv element).
         String viewport = "%[fx:w+" + (2 * BLEED_PX) + "]x%[fx:h+" + (2 * BLEED_PX) + "]-" + BLEED_PX + "-" + BLEED_PX;
         List<String> cmd = new ArrayList<>(List.of("convert",
-            "-size", FULL_W + "x" + FULL_H, in.toString(),
+            "-size", fullW + "x" + fullH, in.toString(),
             "-auto-orient",
             "-profile", iccPath.toString(),
             "-strip", "-colorspace", "sRGB"));
@@ -148,11 +169,11 @@ public final class ImBleedVariant implements Variant {
             cmd.addAll(List.of("-alpha", "remove", "-type", "truecolor", "-background", "white"));
         }
         cmd.addAll(List.of(
-            "-resize", CONTENT_W + "x" + CONTENT_H + "^",
+            "-resize", contentW + "x" + contentH + "^",
             "-virtual-pixel", "Mirror",
             "-set", "option:distort:viewport", viewport,
             "-distort", "SRT", "0",
-            "-gravity", "center", "-extent", FULL_W + "x" + FULL_H,
+            "-gravity", "center", "-extent", fullW + "x" + fullH,
             outputFormat.ext + ":" + out));
         return cmd;
     }
