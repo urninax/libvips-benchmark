@@ -41,6 +41,21 @@
             <version>${aws.sdk.version}</version>
         </dependency>
 
+        <!--
+            AWS SDK pulls in slf4j-api transitively but no binding, so every run logs
+            "SLF4J: Failed to load class StaticLoggerBinder" to stderr. This harness has its own
+            System.out-based reporting (progress lines, ResultTable) and no use for a real logging
+            backend, so slf4j-nop is the correct fix - not slf4j-simple (which would start emitting
+            actual log lines mixed into the benchmark's own stdout output) and not suppressing the
+            warning by other means (that leaves the underlying "no binding" gap in place for any
+            future dependency that DOES try to log through SLF4J).
+        -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-nop</artifactId>
+            <version>2.0.16</version>
+        </dependency>
+
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>

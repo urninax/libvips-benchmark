@@ -249,7 +249,9 @@ public final class Main {
         rssSampler.stop();
         vipsMem.stop();
 
-        ResultTable.print(spec, List.of(result), false); // human-readable, for live container logs - footer belongs on the final section summary only
+        // No human-readable table here - the orchestrator's two final section summaries (see
+        // run()) already cover every variant; printing this variant's own table too just
+        // duplicated every row (and its footer, before that got fixed) once per subprocess.
         System.out.println(DrainStatsCodec.encode(result)); // machine-readable, for the parent
     }
 
