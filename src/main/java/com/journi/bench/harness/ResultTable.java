@@ -14,9 +14,9 @@ public final class ResultTable {
     // so anything wider than whatever value happened to line up by luck - a
     // 6-digit RSS, a 4-digit percentile - silently drifted the columns apart.
     private static final String HEADER_FMT =
-        "%-46s %7s %6s %9s %7s %11s %8s %8s %10s %7s %5s %7s %8s %8s %8s %8s %8s %5s%n";
+        "%-46s %7s %6s %9s %7s %11s %8s %7s %8s %10s %7s %5s %7s %8s %8s %8s %8s %8s %5s%n";
     private static final String ROW_FMT =
-        "%-46s %7d %6d %9.2f %7.2f %11.2f %8.1f %8.1f %10.1s %7.1f %5d %7d %8.2f %8.1f %8.1f %8.1f %8.1f %5d%s%n";
+        "%-46s %7d %6d %9.2f %7.2f %11.2f %8.1f %7.1f %8.1f %10.1s %7.1f %5d %7d %8.2f %8.1f %8.1f %8.1f %8.1f %5d%s%n";
 
     /** Prints the section table WITH the column-glossary footer - use for the final, orchestrator-level summary (called once per resize type per run). */
     public static void print(String sectionTitle, List<DrainStats> results) {
@@ -37,7 +37,7 @@ public final class ResultTable {
         System.out.println("=== " + sectionTitle + " ===");
         System.out.printf(HEADER_FMT,
             "variant", "workers", "queue", "drain(s)", "±sd", "thru/s",
-            "totalMB", "rssChild", "vipsPeak", "cpu%", "gc(n)", "gc(ms)",
+            "totalMB", "MB/job", "rssChild", "vipsPeak", "cpu%", "gc(n)", "gc(ms)",
             "overlap", "p50ms", "p95ms", "p99ms", "maxms", "fail");
         for (DrainStats r : results) {
             System.out.printf(ROW_FMT,
@@ -45,6 +45,7 @@ public final class ResultTable {
                 r.drainSeconds().mean(), r.drainSeconds().stddev(),
                 r.throughputPerSec(),
                 r.peakTotalRssKb() / 1024.0,
+                r.workers() > 0 ? (r.peakTotalRssKb() / 1024.0) / r.workers() : 0.0,
                 r.peakChildrenRssKb() / 1024.0,
                 r.vipsTrackedPeakKb() < 0 ? "n/a" : String.format("%.1f", r.vipsTrackedPeakKb() / 1024.0),
                 r.cpuUtilPercent(),
@@ -62,6 +63,11 @@ public final class ResultTable {
         System.out.println("  totalMB: peak total memory (harness process + any forked children) for THIS variant alone -");
         System.out.println("  trustworthy for every engine since each variant now runs in its own isolated child JVM");
         System.out.println("  (see Main.runIsolated()), so it can't be contaminated by memory an earlier variant left behind.");
+        System.out.println("  MB/job = totalMB / workers: memory per concurrently in-flight job, SPEED-INDEPENDENT - unlike");
+        System.out.println("  totalMB/(thru/s) (memory per unit of THROUGHPUT, which a faster engine wins for free even at equal");
+        System.out.println("  peak memory), this isolates \"how much does one job slot cost\" from how fast the engine drains the");
+        System.out.println("  queue. Deliberately totalMB/workers, NOT totalMB/(jobs completed) - the latter shrinks arbitrarily");
+        System.out.println("  as measuredReps/queueSize grow even though the actual peak concurrency never changes.");
         System.out.println("  totalMB/rssChild are PSS (proportional set size), NOT raw RSS - GM/IM's children are 8 separate");
         System.out.println("  processes mapping the same shared libraries (libjpeg, libGraphicsMagick, glibc); summing raw RSS");
         System.out.println("  across siblings would count each shared page once PER PROCESS (~8x), while vips' single process");
