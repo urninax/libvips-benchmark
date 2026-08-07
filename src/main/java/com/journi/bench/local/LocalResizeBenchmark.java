@@ -9,6 +9,7 @@ import app.photofox.vipsffm.enums.VipsInteresting;
 import app.photofox.vipsffm.enums.VipsSize;
 import com.journi.bench.BenchConfig;
 import com.journi.bench.metrics.RssSampler;
+import com.journi.bench.metrics.VipsTrackedMemory;
 import com.journi.bench.variant.GmStandardVariant;
 import com.journi.bench.variant.ProcessRunner;
 

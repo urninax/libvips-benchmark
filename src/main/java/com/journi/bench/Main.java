@@ -5,6 +5,7 @@ import com.journi.bench.harness.DrainStats;
 import com.journi.bench.harness.ResultTable;
 import com.journi.bench.local.LocalResizeBenchmark;
 import com.journi.bench.metrics.RssSampler;
+import com.journi.bench.metrics.VipsTrackedMemory;
 import com.journi.bench.s3.S3Support;
 import com.journi.bench.variant.*;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -96,7 +97,18 @@ public final class Main {
         samplerThread.setDaemon(true);
         samplerThread.start();
 
-        DrainHarness harness = new DrainHarness(rssSampler);
+        // rssSampler cannot attribute memory to an individual vips variant once a later variant
+        // reuses freed allocator space (see DrainHarness's baseline comment) - this live counter
+        // is libvips' own answer to "how much am I holding right now" and is immune to that.
+        VipsTrackedMemory vipsMem = new VipsTrackedMemory(30);
+        Thread vipsMemThread = new Thread(vipsMem, "vips-mem-sampler");
+        vipsMemThread.setDaemon(true);
+        vipsMemThread.start();
+        if (!VipsTrackedMemory.available()) {
+            System.out.println("NOTE: vips_tracked_get_mem() did not resolve - vipsPeak will read n/a.");
+        }
+
+        DrainHarness harness = new DrainHarness(rssSampler, vipsMem);
 
         // BENCH_ENGINES gates which variants actually run - e.g. BENCH_ENGINES=vips skips
         // the GM/IM baseline entirely, useful when iterating on vips-only behavior (streaming
@@ -156,6 +168,7 @@ public final class Main {
         ResultTable.print("Bleed resize", bleedResults);
 
         rssSampler.stop();
+        vipsMem.stop();
     }
 
     /** Repeats the seeded fixture keys to fill a queue of the target size, cycling baseline/progressive. */

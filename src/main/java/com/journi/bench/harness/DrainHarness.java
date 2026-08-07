@@ -4,6 +4,7 @@ import com.journi.bench.BenchConfig;
 import com.journi.bench.metrics.CpuSampler;
 import com.journi.bench.metrics.GcSampler;
 import com.journi.bench.metrics.RssSampler;
+import com.journi.bench.metrics.VipsTrackedMemory;
 import com.journi.bench.variant.Variant;
 
 import java.util.ArrayList;
@@ -37,11 +38,13 @@ public final class DrainHarness {
     private static final long PROGRESS_INTERVAL_MS = 2000;
 
     private final RssSampler rssSampler;
+    private final VipsTrackedMemory vipsMem;
     private final CpuSampler cpuSampler = new CpuSampler();
     private final GcSampler gcSampler = new GcSampler();
 
-    public DrainHarness(RssSampler rssSampler) {
+    public DrainHarness(RssSampler rssSampler, VipsTrackedMemory vipsMem) {
         this.rssSampler = rssSampler;
+        this.vipsMem = vipsMem;
     }
 
     public DrainStats run(Variant variant, BenchConfig cfg, List<String> keys) throws Exception {
@@ -49,17 +52,23 @@ public final class DrainHarness {
         int workers = variant.workerCount(cfg);
         int totalReps = cfg.warmupReps() + cfg.measuredReps();
 
-        // All variants in a `run` share one continuous JVM process (see class doc), and
-        // rssSampler.resetPeaks() below only zeroes the TRACKING counters - it can't make
-        // the OS give back heap/metaspace/connection-pool memory a PRIOR variant already
-        // grew into. Without this baseline, a variant that happens to run later (every
-        // vips variant runs after GM/IM - see Main.run()) silently reports peak RSS that
-        // includes memory it never actually needed itself. System.gc() gives G1 a chance
-        // to hand back what it can before we snapshot; what's left is genuinely shared,
-        // unavoidable JVM baseline (this variant's own one-time setUp() cost, e.g.
-        // Vips.init() loading libvips, is deliberately INSIDE this baseline too - a real
-        // server pays that once at startup, not per job, so excluding it from every
-        // variant's reported number is the fair comparison for capacity planning).
+        // WARNING ABOUT THIS BASELINE - it does NOT make rssSelf trustworthy.
+        //
+        // All variants in a `run` share one continuous JVM process (see class doc), so an
+        // earlier variant's memory is still resident when a later one starts. Subtracting a
+        // pre-variant baseline was intended to isolate each variant, but it CANNOT work:
+        // free() does not return memory to the OS - glibc keeps it in the allocator's free
+        // lists - so a later variant baselines at the already-elevated level its predecessor
+        // left behind, reuses those same free lists, barely grows RSS, and reports ~0. Since
+        // Main.run() runs GM/IM first and every vips variant after it, the variants we most
+        // care about are exactly the ones that read near-zero. This swapped an inflated
+        // artifact for a deflated one; it is not a fix.
+        //
+        // rssSelf is therefore kept only as a diagnostic. The trustworthy per-variant number
+        // for the in-process vips variants is vipsTrackedPeakKb below - libvips' own live
+        // allocation counter, which drops back between variants and is immune to whatever the
+        // allocator is hoarding. GM/IM keep using peakChildrenKb, which was never affected:
+        // every job forks a fresh child the kernel accounts for and reaps separately.
         System.gc();
         Thread.sleep(50);
         long baselineSelfKb = rssSampler.currentSelfKb();
@@ -67,6 +76,7 @@ public final class DrainHarness {
         List<Double> drainSecondsMeasured = new ArrayList<>();
         List<JobResult> measuredResults = Collections.synchronizedList(new ArrayList<>());
         long peakSelfKb = 0, peakChildrenKb = 0, peakTotalKb = 0, vmHwmKb = 0;
+        long vipsTrackedPeakKb = -1;
         long gcCountTotal = 0, gcPauseMsTotal = 0;
         long cpuNanosTotal = 0;
         long wallNanosTotal = 0;
@@ -88,11 +98,22 @@ public final class DrainHarness {
                 CountDownLatch done = new CountDownLatch(workers);
                 int repIndex = rep;
 
-                if (measured) rssSampler.resetPeaks();
+                if (measured) {
+                    rssSampler.resetPeaks();
+                    vipsMem.resetPeak();
+                }
                 GcSampler.Snapshot gcBefore = gcSampler.snapshot();
                 long cpuBefore = cpuSampler.jvmProcessCpuNanos() + cpuSampler.reapedChildrenCpuNanos();
 
                 AtomicLong completed = new AtomicLong(0);
+                // Distinct destination per JOB, not per (key, rep). expandToQueueSize() cycles a
+                // handful of base keys to fill the queue, so with the default 2 fixtures and
+                // queueSize=cores*2 the old `key + ".rep" + rep + ".out"` had 8 concurrent jobs
+                // PUTting to the same S3 object every rep. No corruption (each multipart upload
+                // has its own uploadId) but it is not what production does - production writes a
+                // distinct output per input - and it exercises the store's overwrite path instead
+                // of its create path.
+                AtomicLong jobSeq = new AtomicLong(0);
                 AtomicBoolean repRunning = new AtomicBoolean(true);
                 long t0 = System.nanoTime();
 
@@ -120,7 +141,8 @@ public final class DrainHarness {
                         try {
                             String key;
                             while ((key = queue.poll()) != null) {
-                                String destKey = key + ".rep" + repIndex + ".out";
+                                String destKey = key + ".rep" + repIndex + ".job"
+                                    + jobSeq.getAndIncrement() + ".out";
                                 long jobStart = System.nanoTime();
                                 JobResult result;
                                 try {
@@ -155,6 +177,7 @@ public final class DrainHarness {
                     peakChildrenKb = Math.max(peakChildrenKb, rssSampler.peakChildrenKb());
                     peakTotalKb = Math.max(peakTotalKb, rssSampler.peakTotalKb());
                     vmHwmKb = Math.max(vmHwmKb, rssSampler.vmHwmKb());
+                    vipsTrackedPeakKb = Math.max(vipsTrackedPeakKb, vipsMem.peakKb());
                     GcSampler.Snapshot d = gcSampler.delta(gcBefore, gcAfter);
                     gcCountTotal += Math.max(0, d.collectionCount());
                     gcPauseMsTotal += Math.max(0, d.collectionTimeMillis());
@@ -167,7 +190,6 @@ public final class DrainHarness {
         }
 
         Stats.Summary drainStats = Stats.summarize(drainSecondsMeasured);
-        double throughput = drainStats.mean() > 0 ? keys.size() / drainStats.mean() : 0;
 
         List<Double> latenciesMs = new ArrayList<>();
         int failures = 0;
@@ -186,6 +208,14 @@ public final class DrainHarness {
         }
         Collections.sort(latenciesMs);
 
+        // keys.size() / drainStats.mean() counted failed jobs as completed work - a variant
+        // that fails fast (workers hit an error and move on instead of doing real work) looked
+        // FASTER than one that actually finishes every job. Use completed successes over the
+        // summed wall time of the measured reps instead, so a failing variant's throughput
+        // reflects the work it actually did, not the queue it burned through.
+        double totalDrainSeconds = drainSecondsMeasured.stream().mapToDouble(Double::doubleValue).sum();
+        double throughput = totalDrainSeconds > 0 ? latenciesMs.size() / totalDrainSeconds : 0;
+
         double cpuUtilPercent = wallNanosTotal > 0
             ? 100.0 * cpuNanosTotal / ((double) wallNanosTotal * cfg.cores())
             : 0;
@@ -201,7 +231,7 @@ public final class DrainHarness {
         return new DrainStats(
             variant.name(), workers, keys.size(),
             drainStats, throughput,
-            peakSelfKbIsolated, peakChildrenKb, peakTotalKbIsolated, vmHwmKb,
+            peakSelfKbIsolated, peakChildrenKb, peakTotalKbIsolated, vmHwmKb, vipsTrackedPeakKb,
             Stats.percentile(latenciesMs, 0.50),
             Stats.percentile(latenciesMs, 0.95),
             Stats.percentile(latenciesMs, 0.99),

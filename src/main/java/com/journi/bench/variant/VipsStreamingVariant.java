@@ -217,7 +217,13 @@ public final class VipsStreamingVariant implements Variant {
     private void saveToTarget(VImage image, VTarget target) throws VipsError {
         switch (outputFormat) {
             case JPG -> image.jpegsaveTarget(target, VipsOption.Int("Q", 85), VipsOption.Boolean("strip", true));
-            case PNG -> image.pngsaveTarget(target, VipsOption.Boolean("strip", true));
+            // filter=248 is libpng's PNG_ALL_FILTERS (0xF8), the adaptive per-row filtering
+            // GM does via `-define png:filter-type=6`. pngsave defaults to filter=none, which
+            // silently emits a ~28% larger file in a fraction of the time (see
+            // LocalResizeBenchmark's matching fix) - without this, GM vs vips isn't comparing
+            // resize speed, it's comparing "did adaptive filtering or not".
+            case PNG -> image.pngsaveTarget(target, VipsOption.Boolean("strip", true),
+                VipsOption.Int("filter", 248));
             case WEBP -> image.webpsaveTarget(target, VipsOption.Int("Q", 85), VipsOption.Boolean("strip", true));
         }
     }

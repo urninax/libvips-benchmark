@@ -1,4 +1,4 @@
-package com.journi.bench.local;
+package com.journi.bench.metrics;
 
 import app.photofox.vipsffm.VipsLibLookup;
 
@@ -39,7 +39,7 @@ import java.util.concurrent.locks.LockSupport;
  * the symbol is resolved directly via FFM, reusing the library's own lookup so it binds the
  * exact same libvips the rest of the benchmark is calling.
  */
-final class VipsTrackedMemory implements Runnable {
+public final class VipsTrackedMemory implements Runnable {
 
     private static final MethodHandle GET_MEM = resolveGetMem();
 
@@ -47,16 +47,16 @@ final class VipsTrackedMemory implements Runnable {
     private volatile boolean running = true;
     private volatile long peakBytes = 0;
 
-    VipsTrackedMemory(long intervalMillis) {
+    public VipsTrackedMemory(long intervalMillis) {
         this.intervalNanos = intervalMillis * 1_000_000L;
     }
 
     /** True when the symbol resolved - otherwise every reading is -1 and callers should say "n/a". */
-    static boolean available() {
+    public static boolean available() {
         return GET_MEM != null;
     }
 
-    static long currentBytes() {
+    public static long currentBytes() {
         if (GET_MEM == null) return -1;
         try {
             return (long) GET_MEM.invokeExact();
@@ -74,15 +74,15 @@ final class VipsTrackedMemory implements Runnable {
         }
     }
 
-    void stop() {
+    public void stop() {
         running = false;
     }
 
-    void resetPeak() {
+    public void resetPeak() {
         peakBytes = 0;
     }
 
-    long peakKb() {
+    public long peakKb() {
         return GET_MEM == null ? -1 : peakBytes / 1024;
     }
 
