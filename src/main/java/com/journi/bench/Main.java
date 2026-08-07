@@ -244,7 +244,7 @@ public final class Main {
         rssSampler.stop();
         vipsMem.stop();
 
-        ResultTable.print(spec, List.of(result)); // human-readable, for live container logs
+        ResultTable.print(spec, List.of(result), false); // human-readable, for live container logs - footer belongs on the final section summary only
         System.out.println(DrainStatsCodec.encode(result)); // machine-readable, for the parent
     }
 
