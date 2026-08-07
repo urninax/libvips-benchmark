@@ -7,12 +7,14 @@ public record DrainStats(
     Stats.Summary drainSeconds,
     double throughputPerSec,
     /**
-     * Peak RSS of the process running this variant, in KB, minus its own bare-JVM-startup
-     * baseline (see DrainHarness). Trustworthy per-variant total as of Main's subprocess-per-
-     * variant isolation - each variant gets its own fresh child JVM, so this can no longer be
-     * contaminated by whatever an earlier variant left resident in a shared process.
+     * Peak PSS (proportional set size, not raw RSS - see RssSampler) of the process running this
+     * variant, in KB, minus its own bare-JVM-startup baseline captured after warmup (see
+     * DrainHarness). Trustworthy per-variant total as of Main's subprocess-per-variant isolation -
+     * each variant gets its own fresh child JVM, so this can no longer be contaminated by whatever
+     * an earlier variant left resident in a shared process.
      */
     long peakSelfRssKb,
+    /** Peak PSS summed across this variant's forked children - PSS specifically to avoid overcounting shared library pages mapped by every sibling process (see RssSampler). */
     long peakChildrenRssKb,
     /** peakSelfRssKb + peakChildrenRssKb: the real total-memory figure for this variant, comparable across every engine. */
     long peakTotalRssKb,
