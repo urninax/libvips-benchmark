@@ -92,6 +92,13 @@ public final class GmStandardVariant implements Variant {
             Files.write(inFile, full);
             long fetchEnd = System.nanoTime();
 
+            // NOTE ON THE PROCESS METRIC: identifyDims() below is a second `gm identify` fork,
+            // timed inside procStart/procEnd alongside the actual resize. vips never pays this -
+            // thumbnailBuffer/thumbnailSource read dimensions off the header for free as part of
+            // the same decode call. This mirrors production's GraphicsMagickClient.
+            // readBasicImageInfo() (see class doc), so it's not being removed - but that also
+            // means the GM "process" column in ResultTable is (metadata read + resize), not pure
+            // resize, and isn't an apples-to-apples comparison against vips' process column.
             long procStart = System.nanoTime();
             int[] srcDims = identifyDims(inFile);
             int[] target = areaFit(srcDims[0], srcDims[1], TARGET_PIXELS);
@@ -159,7 +166,14 @@ public final class GmStandardVariant implements Variant {
     }
 
     private List<String> gmCommand(Path in, Path out, int w, int h) {
-        List<String> cmd = new ArrayList<>(List.of("gm", "convert", in.toString(),
+        // -size before the source path is a libjpeg read-time hint (DCT-domain scaled
+        // decompression) - without it GM fully decodes at source resolution before discarding
+        // most of it on resize, while vips gets the equivalent shrink-on-load for free. Same
+        // fix as b9814e7 in benchmark_resize.sh, ported here (was never applied to this
+        // harness, so the standard-resize row was comparing "does GM get a decode shortcut"
+        // rather than actual resize cost, and the gap grew with source resolution).
+        List<String> cmd = new ArrayList<>(List.of("gm", "convert",
+            "-size", w + "x" + h, in.toString(),
             "-auto-orient",
             "-profile", iccPath.toString(),
             "-strip", "-colorspace", "RGB"));
@@ -175,7 +189,12 @@ public final class GmStandardVariant implements Variant {
             cmd.addAll(List.of("-type", "truecolor", "-background", "#ffffff", "-flatten"));
         }
         cmd.addAll(List.of(
-            "-filter", "Bessel",
+            // Lanczos, not Bessel: matches vips' thumbnail default kernel (lanczos3) and the
+            // other two harnesses (LocalResizeBenchmark, benchmark_resize.sh). Bessel is a
+            // different, cheaper-to-evaluate kernel - leaving it in here made this harness's
+            // numbers incomparable to the other two AND meant GM and vips weren't even doing
+            // the same resampling algorithm.
+            "-filter", "Lanczos",
             "-resize", w + "x" + h + "!",
             outputFormat.ext + ":" + out));
         return cmd;
