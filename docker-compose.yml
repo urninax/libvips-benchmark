@@ -123,6 +123,10 @@ services:
       BENCH_OUTPUT_FORMAT: ${BENCH_OUTPUT_FORMAT:-jpg}
       # e.g. BENCH_ENGINES=vips to skip the GM/IM baseline entirely and only run vips variants
       BENCH_ENGINES: ${BENCH_ENGINES:-gm,im,vips}
+      # e.g. BENCH_RESIZE_TYPES=standard to skip IM's bleed resize (its own per-job cost runs into
+      # the SECONDS, easily 10x+ a standard-resize job - not something a quick iteration loop wants
+      # to pay for every time)
+      BENCH_RESIZE_TYPES: ${BENCH_RESIZE_TYPES:-standard,bleed}
       # glibc (default) or jemalloc - read by entrypoint.sh, applied via LD_PRELOAD to the WHOLE
       # container (every variant subprocess and every gm/convert child), not just vips, so
       # switching allocators doesn't become "whichever config makes one engine look best".

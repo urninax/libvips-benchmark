@@ -114,36 +114,49 @@ public final class Main {
         boolean runIm = engines.contains("im");
         boolean runVips = engines.contains("vips");
 
+        Set<String> resizeTypes = Arrays.stream(cfg.resizeTypes())
+            .map(t -> t.trim().toLowerCase(Locale.ROOT))
+            .collect(Collectors.toSet());
+        boolean runStandard = resizeTypes.contains("standard");
+        // Bleed's per-job cost dwarfs standard resize's (full 2552x3580 canvas, distort/virtual-
+        // pixel work - IM's own p50 runs into the seconds, vs standard resize's hundreds of ms),
+        // so BENCH_RESIZE_TYPES=standard lets a quick iteration loop skip paying for it.
+        boolean runBleed = resizeTypes.contains("bleed");
+
         System.out.println("=== libvips-benchmark ===");
         System.out.println("cores=" + cfg.cores() + " queueSize=" + cfg.queueSize()
             + " warmup=" + cfg.warmupReps() + " measuredReps=" + cfg.measuredReps()
             + " inputFormat=" + cfg.inputFormat() + " outputFormat=" + cfg.outputFormat()
-            + " engines=" + engines
+            + " engines=" + engines + " resizeTypes=" + resizeTypes
             // Recorded here, not just in entrypoint.sh's own log line, so it's on the SAME line
             // results get pasted from - which allocator produced a given totalMB/rssChild figure
             // is provenance that has to travel with the numbers, not sit in a separate log line
             // that's easy to leave out when copying results into a report.
             + " allocator=" + System.getenv().getOrDefault("BENCH_ALLOCATOR", "glibc"));
 
-        List<String> standardSpecs = new ArrayList<>();
-        if (runGm) standardSpecs.add("gm-standard");
-        if (runVips) {
-            for (VipsStreamingVariant.Mode mode : VipsStreamingVariant.Mode.values()) {
-                standardSpecs.add("vips-standard-" + mode);
+        if (runStandard) {
+            List<String> standardSpecs = new ArrayList<>();
+            if (runGm) standardSpecs.add("gm-standard");
+            if (runVips) {
+                for (VipsStreamingVariant.Mode mode : VipsStreamingVariant.Mode.values()) {
+                    standardSpecs.add("vips-standard-" + mode);
+                }
             }
+            List<DrainStats> standardResults = runIsolated(standardSpecs);
+            ResultTable.print("Standard resize", standardResults);
         }
-        List<DrainStats> standardResults = runIsolated(standardSpecs);
-        ResultTable.print("Standard resize", standardResults);
 
-        List<String> bleedSpecs = new ArrayList<>();
-        if (runIm) bleedSpecs.add("im-bleed");
-        if (runVips) {
-            for (VipsStreamingVariant.Mode mode : VipsStreamingVariant.Mode.values()) {
-                bleedSpecs.add("vips-bleed-" + mode);
+        if (runBleed) {
+            List<String> bleedSpecs = new ArrayList<>();
+            if (runIm) bleedSpecs.add("im-bleed");
+            if (runVips) {
+                for (VipsStreamingVariant.Mode mode : VipsStreamingVariant.Mode.values()) {
+                    bleedSpecs.add("vips-bleed-" + mode);
+                }
             }
+            List<DrainStats> bleedResults = runIsolated(bleedSpecs);
+            ResultTable.print("Bleed resize", bleedResults);
         }
-        List<DrainStats> bleedResults = runIsolated(bleedSpecs);
-        ResultTable.print("Bleed resize", bleedResults);
     }
 
     /** Runs each spec's variant in its own child JVM, STRICTLY sequentially - concurrent variants would reintroduce the CPU/memory contention isolation is meant to remove. */

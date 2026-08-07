@@ -23,6 +23,9 @@ public record BenchConfig(
     long partSizeBytes,     // S3 multipart threshold, default 5 MiB
 
     String[] engines,       // gm, im, vips
+    String[] resizeTypes,   // standard, bleed - e.g. BENCH_RESIZE_TYPES=standard to skip IM's bleed
+                            // resize entirely, which is dramatically slower per-job (see
+                            // ImBleedVariant) and not always what you want to pay for in a quick run
     String[] ioModes,       // buffered, streamed (vips only)
     String[] keys,          // S3 key BASE NAMES to seed/process, no extension -
                             // inputFormat.ext is appended (see Main.seed()/run())
@@ -57,6 +60,7 @@ public record BenchConfig(
             Long.parseLong(str(env, "PART_SIZE_BYTES", String.valueOf(5L * 1024 * 1024))),
 
             str(env, "BENCH_ENGINES", "gm,im,vips").split(","),
+            str(env, "BENCH_RESIZE_TYPES", "standard,bleed").split(","),
             str(env, "BENCH_IO_MODES", "buffered,streamed").split(","),
             str(env, "BENCH_KEYS", "fixtures/baseline,fixtures/progressive").split(","),
 
