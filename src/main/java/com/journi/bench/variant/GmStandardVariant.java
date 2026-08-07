@@ -54,7 +54,7 @@ public final class GmStandardVariant implements Variant {
 
     @Override
     public String name() {
-        return "GM standard resize (fetch-then-process) [" + inputFormat.ext + "->" + outputFormat.ext + "]";
+        return "GM standard resize (fet-proc) [" + inputFormat.ext + "->" + outputFormat.ext + "]";
     }
 
     /**

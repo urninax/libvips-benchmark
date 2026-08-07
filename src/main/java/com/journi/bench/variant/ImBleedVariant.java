@@ -52,7 +52,7 @@ public final class ImBleedVariant implements Variant {
 
     @Override
     public String name() {
-        return "IM bleed resize (fetch-then-process) [" + inputFormat.ext + "->" + outputFormat.ext + "]";
+        return "IM bleed resize (fet-proc) [" + inputFormat.ext + "->" + outputFormat.ext + "]";
     }
 
     /**
