@@ -52,23 +52,21 @@ public final class DrainHarness {
         int workers = variant.workerCount(cfg);
         int totalReps = cfg.warmupReps() + cfg.measuredReps();
 
-        // WARNING ABOUT THIS BASELINE - it does NOT make rssSelf trustworthy.
+        // This baseline is now trustworthy - Main only ever calls run() ONCE per process (each
+        // variant is its own child JVM, spawned fresh by Main.runIsolated() - see its doc). That
+        // was NOT always true: this harness used to run all six variants back-to-back inside one
+        // shared JVM, and since free() does not return memory to the OS (glibc keeps it in the
+        // allocator's free lists), a later variant's baseline would already sit at whatever level
+        // an EARLIER variant left behind - reusing those same free lists, barely growing RSS, and
+        // reporting a near-zero peak that had nothing to do with how much memory the variant
+        // actually used. Per-process isolation removes that failure mode entirely: this baseline
+        // is just this variant's own bare JVM startup cost (classloading, thread stacks, initial
+        // metaspace), captured before any of its own work has run.
         //
-        // All variants in a `run` share one continuous JVM process (see class doc), so an
-        // earlier variant's memory is still resident when a later one starts. Subtracting a
-        // pre-variant baseline was intended to isolate each variant, but it CANNOT work:
-        // free() does not return memory to the OS - glibc keeps it in the allocator's free
-        // lists - so a later variant baselines at the already-elevated level its predecessor
-        // left behind, reuses those same free lists, barely grows RSS, and reports ~0. Since
-        // Main.run() runs GM/IM first and every vips variant after it, the variants we most
-        // care about are exactly the ones that read near-zero. This swapped an inflated
-        // artifact for a deflated one; it is not a fix.
-        //
-        // rssSelf is therefore kept only as a diagnostic. The trustworthy per-variant number
-        // for the in-process vips variants is vipsTrackedPeakKb below - libvips' own live
-        // allocation counter, which drops back between variants and is immune to whatever the
-        // allocator is hoarding. GM/IM keep using peakChildrenKb, which was never affected:
-        // every job forks a fresh child the kernel accounts for and reaps separately.
+        // vipsTrackedPeakKb remains a useful secondary figure for the vips variants - it's
+        // libvips' own live allocation counter, so it isolates "how much image data libvips
+        // itself is holding" even from JVM heap noise - but it is no longer the ONLY trustworthy
+        // number; peakSelfKb/peakTotalKb below are real per-variant totals now, for every engine.
         System.gc();
         Thread.sleep(50);
         long baselineSelfKb = rssSampler.currentSelfKb();
@@ -220,11 +218,12 @@ public final class DrainHarness {
             ? 100.0 * cpuNanosTotal / ((double) wallNanosTotal * cfg.cores())
             : 0;
 
-        // Subtract the pre-variant baseline so peakSelfKb/peakTotalKb reflect what THIS
-        // variant's measured reps actually added, not memory a prior variant already left
-        // resident in the shared JVM process (see the baseline capture above). Children are
-        // this variant's own forked processes - never present at baseline - so peakChildrenKb
-        // needs no adjustment.
+        // Subtract the bare-JVM-startup baseline so peakSelfKb/peakTotalKb reflect what THIS
+        // variant's measured reps actually added on top of classloading/thread-stack/metaspace
+        // overhead common to every variant, not the variant's raw process footprint (see the
+        // baseline capture above - now trustworthy since each variant gets its own process).
+        // Children are this variant's own forked processes - never present at baseline - so
+        // peakChildrenKb needs no adjustment.
         long peakSelfKbIsolated = Math.max(0, peakSelfKb - baselineSelfKb);
         long peakTotalKbIsolated = Math.max(peakChildrenKb, peakTotalKb - baselineSelfKb);
 

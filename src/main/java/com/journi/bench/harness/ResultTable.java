@@ -14,22 +14,23 @@ public final class ResultTable {
     // so anything wider than whatever value happened to line up by luck - a
     // 6-digit RSS, a 4-digit percentile - silently drifted the columns apart.
     private static final String HEADER_FMT =
-        "%-46s %7s %6s %9s %7s %11s %10s %10s %7s %5s %7s %8s %8s %8s %8s %8s %5s%n";
+        "%-46s %7s %6s %9s %7s %11s %8s %8s %10s %7s %5s %7s %8s %8s %8s %8s %8s %5s%n";
     private static final String ROW_FMT =
-        "%-46s %7d %6d %9.2f %7.2f %11.2f %10.1f %10.1s %7.1f %5d %7d %8.2f %8.1f %8.1f %8.1f %8.1f %5d%s%n";
+        "%-46s %7d %6d %9.2f %7.2f %11.2f %8.1f %8.1f %10.1s %7.1f %5d %7d %8.2f %8.1f %8.1f %8.1f %8.1f %5d%s%n";
 
     public static void print(String sectionTitle, List<DrainStats> results) {
         System.out.println();
         System.out.println("=== " + sectionTitle + " ===");
         System.out.printf(HEADER_FMT,
             "variant", "workers", "queue", "drain(s)", "±sd", "thru/s",
-            "rssChild", "vipsPeak", "cpu%", "gc(n)", "gc(ms)",
+            "totalMB", "rssChild", "vipsPeak", "cpu%", "gc(n)", "gc(ms)",
             "overlap", "p50ms", "p95ms", "p99ms", "maxms", "fail");
         for (DrainStats r : results) {
             System.out.printf(ROW_FMT,
                 r.variantName(), r.workers(), r.queueSize(),
                 r.drainSeconds().mean(), r.drainSeconds().stddev(),
                 r.throughputPerSec(),
+                r.peakTotalRssKb() / 1024.0,
                 r.peakChildrenRssKb() / 1024.0,
                 r.vipsTrackedPeakKb() < 0 ? "n/a" : String.format("%.1f", r.vipsTrackedPeakKb() / 1024.0),
                 r.cpuUtilPercent(),
@@ -43,11 +44,13 @@ public final class ResultTable {
         System.out.println("  per second of measured wall time (failed jobs are NOT counted as throughput).");
         System.out.println("  GM/IM 'process' time includes a `gm identify`/metadata-read fork before the resize -");
         System.out.println("  vips gets dimensions free from the decode header, so this column is not resize-only for GM/IM.");
-        System.out.println("  rssChild (MB): peak RSS of forked gm/convert children, meaningful for GM/IM rows.");
-        System.out.println("  vipsPeak (MB): peak of libvips' own vips_tracked_get_mem(), meaningful for vips rows -");
-        System.out.println("  NOT the same quantity as rssChild, never compare them directly. peakSelfRssKb/peakTotalRssKb");
-        System.out.println("  are still in the DrainStats record for backward compat but are UNRELIABLE after the first");
-        System.out.println("  variant in a run (glibc does not return freed memory to the OS) and are no longer printed.");
+        System.out.println("  totalMB: peak total memory (harness process + any forked children) for THIS variant alone -");
+        System.out.println("  trustworthy for every engine since each variant now runs in its own isolated child JVM");
+        System.out.println("  (see Main.runIsolated()), so it can't be contaminated by memory an earlier variant left behind.");
+        System.out.println("  rssChild (MB): peak RSS of forked gm/convert children specifically, meaningful for GM/IM rows.");
+        System.out.println("  vipsPeak (MB): peak of libvips' own vips_tracked_get_mem() - a secondary, vips-only figure that");
+        System.out.println("  UNDERCOUNTS true memory (misses libjpeg/libpng/libwebp's own scratch buffers); use totalMB for");
+        System.out.println("  an actual total, this for \"how much image data is libvips itself holding\".");
         System.out.println("  cpu%: JVM+children CPU time / (wall time * cores)");
         System.out.println("  overlap = (fetch+process+upload)/total; >1.0 means I/O overlapped compute (streaming variants only)");
         System.out.println("  p50/p95/p99/max in ms, pooled over " + (results.isEmpty() ? 0 : results.get(0).latencySampleCount()) + " samples (measured reps x queue size)");

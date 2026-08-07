@@ -7,19 +7,23 @@ public record DrainStats(
     Stats.Summary drainSeconds,
     double throughputPerSec,
     /**
-     * UNRELIABLE for any variant after the first - glibc does not return freed memory to the
-     * OS, so later variants baseline at the elevated level their predecessors left behind and
-     * read ~0. Diagnostic only; see DrainHarness's baseline comment. Use
-     * {@link #vipsTrackedPeakKb} for vips and {@link #peakChildrenRssKb} for GM/IM.
+     * Peak RSS of the process running this variant, in KB, minus its own bare-JVM-startup
+     * baseline (see DrainHarness). Trustworthy per-variant total as of Main's subprocess-per-
+     * variant isolation - each variant gets its own fresh child JVM, so this can no longer be
+     * contaminated by whatever an earlier variant left resident in a shared process.
      */
     long peakSelfRssKb,
     long peakChildrenRssKb,
+    /** peakSelfRssKb + peakChildrenRssKb: the real total-memory figure for this variant, comparable across every engine. */
     long peakTotalRssKb,
     long vmHwmKb,
     /**
      * Peak of libvips' own vips_tracked_get_mem() during this variant's measured reps, in KB;
-     * -1 when the symbol did not resolve. The trustworthy per-variant memory figure for the
-     * in-process vips variants, and ~0 for GM/IM (which do their work in child processes).
+     * -1 when the symbol did not resolve. A useful secondary figure for the vips variants - it
+     * isolates "how much image data libvips itself is holding" - but UNDERCOUNTS true memory
+     * (misses libjpeg/libpng/libwebp's own internal scratch buffers, see VipsTrackedMemory's
+     * doc), so prefer {@link #peakTotalRssKb} for an actual total. ~0 for GM/IM, which never
+     * call into libvips.
      */
     long vipsTrackedPeakKb,
     double p50Ms,
