@@ -118,7 +118,12 @@ public final class Main {
         System.out.println("cores=" + cfg.cores() + " queueSize=" + cfg.queueSize()
             + " warmup=" + cfg.warmupReps() + " measuredReps=" + cfg.measuredReps()
             + " inputFormat=" + cfg.inputFormat() + " outputFormat=" + cfg.outputFormat()
-            + " engines=" + engines);
+            + " engines=" + engines
+            // Recorded here, not just in entrypoint.sh's own log line, so it's on the SAME line
+            // results get pasted from - which allocator produced a given totalMB/rssChild figure
+            // is provenance that has to travel with the numbers, not sit in a separate log line
+            // that's easy to leave out when copying results into a report.
+            + " allocator=" + System.getenv().getOrDefault("BENCH_ALLOCATOR", "glibc"));
 
         List<String> standardSpecs = new ArrayList<>();
         if (runGm) standardSpecs.add("gm-standard");

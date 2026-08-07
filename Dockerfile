@@ -41,6 +41,15 @@ RUN apt-get update && \
         libwebp-dev liblcms2-dev libexif-dev libtiff-dev && \
     rm -rf /var/lib/apt/lists/*
 
+# jemalloc, installed but OFF by default - see entrypoint.sh, toggled via BENCH_ALLOCATOR=jemalloc.
+# Not the default because it's a real deployment/allocator choice that changes what's being
+# measured, not passive instrumentation - default stays glibc so every existing result stays
+# comparable, and jemalloc is opt-in for A/B comparison.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libjemalloc2 && \
+    rm -rf /var/lib/apt/lists/* && \
+    ldconfig -p | grep -q 'libjemalloc\.so\.2' || { echo "FATAL: libjemalloc2 did not install libjemalloc.so.2"; exit 1; }
+
 # libvips from source (same version/procedure as Dockerfile.ffmbench, so the S3 harness and
 # the local-resize harness run against byte-identical libvips builds).
 #
@@ -86,10 +95,14 @@ FROM native AS bench
 WORKDIR /app
 COPY --from=builder /app/target/bench.jar /app/bench.jar
 COPY samples/ /app/samples/
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
 # Fail the BUILD, not a run against real S3, if vips-ffm cannot bind the source-built
-# libvips (e.g. ldconfig missed it, or the JDK is too old for final FFM).
+# libvips (e.g. ldconfig missed it, or the JDK is too old for final FFM). Deliberately
+# NOT through entrypoint.sh - this is a raw sanity check of the jar/native binding
+# itself, independent of whichever allocator BENCH_ALLOCATOR ends up selecting at runtime.
 RUN java --enable-native-access=ALL-UNNAMED -jar /app/bench.jar smoke-test
 
-ENTRYPOINT ["java", "--enable-native-access=ALL-UNNAMED", "-Xms2g", "-Xmx4g", "-jar", "/app/bench.jar"]
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["run"]

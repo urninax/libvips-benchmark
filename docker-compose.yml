@@ -123,6 +123,10 @@ services:
       BENCH_OUTPUT_FORMAT: ${BENCH_OUTPUT_FORMAT:-jpg}
       # e.g. BENCH_ENGINES=vips to skip the GM/IM baseline entirely and only run vips variants
       BENCH_ENGINES: ${BENCH_ENGINES:-gm,im,vips}
+      # glibc (default) or jemalloc - read by entrypoint.sh, applied via LD_PRELOAD to the WHOLE
+      # container (every variant subprocess and every gm/convert child), not just vips, so
+      # switching allocators doesn't become "whichever config makes one engine look best".
+      BENCH_ALLOCATOR: ${BENCH_ALLOCATOR:-glibc}
       VIPS_CONCURRENCY: "1"   # the already-proven-optimal vips deployment model from earlier bash benchmarking
       RESULTS_DIR: /results
       RUN_ID: ${RUN_ID:-default}

@@ -132,6 +132,30 @@ predictions of real S3 behavior. A confirmation run against real S3 (point
   secondary, engine-specific figures (forked gm/convert PSS; libvips' own
   tracked-allocation counter, which undercounts codec scratch memory) - see
   `ResultTable`'s footer for exactly what each measures.
+- **`MB/thru`** (`totalMB` / `thru/s`) - memory needed to sustain this rate of
+  throughput, the right column for an actual memory-EFFICIENCY claim between
+  engines. `totalMB` alone is bounded mostly by the FIXED concurrency (every
+  variant runs at the same `cores*2` workers by design), so a faster engine
+  can look memory-equivalent to a slower one purely because peak concurrent
+  memory doesn't shrink just because the queue drains quicker. `MB/thru`
+  correctly credits a faster engine for doing more work in that same
+  peak-memory window. (A naive `totalMB / jobs-completed` was considered and
+  rejected - `totalMB` is a peak, not a cumulative sum, so dividing by a
+  volume with no time term makes the number shrink arbitrarily as
+  `measuredReps`/queue size grow, even though peak concurrency never changes.)
+- **Allocator** (`BENCH_ALLOCATOR=glibc|jemalloc`, default `glibc`) - vips' 8
+  concurrent worker threads share ONE process, and glibc can hand out a
+  separate malloc arena per thread to reduce lock contention; none of the PSS
+  fixes above touch that, so vips' memory figures may still carry some
+  multi-threaded-arena overhead GM/IM's multi-process model doesn't pay (each
+  `gm`/`convert` child is single-threaded, one arena). Setting
+  `BENCH_ALLOCATOR=jemalloc` swaps the allocator via `LD_PRELOAD` in
+  `entrypoint.sh`, applied to the WHOLE container - every variant subprocess
+  and every `gm`/`convert` child, not vips only - so it stays an A/B
+  comparison rather than tuning the config that happens to favor one engine.
+  Default stays `glibc` so existing results remain comparable; the active
+  allocator is echoed in both `entrypoint.sh`'s startup log line and the
+  `allocator=` field of the run banner, so it travels with any pasted results.
 - **Per-job latency percentiles** (p50/p95/p99/max), pooled across measured reps
 - **`overlap ratio`** = `(fetch+process+upload)/total` - the direct
   quantitative proof of whether streaming actually overlapped I/O and compute.
