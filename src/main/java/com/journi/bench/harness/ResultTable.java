@@ -42,30 +42,30 @@ public final class ResultTable {
                 r.failureCount(),
                 r.failureCount() > 0 ? "  [FIRST ERROR: " + r.firstError() + "]" : "");
         }
-        System.out.println("  drain(s)/±sd: mean/stddev drain time across measured reps; thru/s: successful keys drained");
-        System.out.println("  per second of measured wall time (failed jobs are NOT counted as throughput).");
-        System.out.println("  GM/IM 'process' time includes a `gm identify`/metadata-read fork before the resize -");
-        System.out.println("  vips gets dimensions free from the decode header, so this column is not resize-only for GM/IM.");
-        System.out.println("  totalMB: peak total memory (harness process + any forked children) for THIS variant alone -");
-        System.out.println("  trustworthy for every engine since each variant now runs in its own isolated child JVM");
-        System.out.println("  (see Main.runIsolated()), so it can't be contaminated by memory an earlier variant left behind.");
-        System.out.println("  MB/thru = totalMB / (thru/s): memory needed to sustain this rate of throughput - the right column");
-        System.out.println("  for a memory-EFFICIENCY claim between engines, since a faster engine that does more work in the");
-        System.out.println("  same peak-memory window earns a lower number here even at equal totalMB. Deliberately NOT");
-        System.out.println("  totalMB/(jobs completed) - that has no time term, so it shrinks arbitrarily as measuredReps/");
-        System.out.println("  queueSize grow even though the actual peak concurrency never changes; dividing by throughput");
-        System.out.println("  (jobs/TIME) keeps the time and volume dimensions correctly coupled.");
-        System.out.println("  totalMB/rssChild are PSS (proportional set size), NOT raw RSS - GM/IM's children are 8 separate");
-        System.out.println("  processes mapping the same shared libraries (libjpeg, libGraphicsMagick, glibc); summing raw RSS");
-        System.out.println("  across siblings would count each shared page once PER PROCESS (~8x), while vips' single process");
-        System.out.println("  never had that inflation - PSS divides shared pages by mapper count so neither engine's number is");
-        System.out.println("  penalized by its own concurrency model (multi-process vs multi-threaded-in-one-process).");
-        System.out.println("  rssChild (MB): peak (PSS) memory of forked gm/convert children specifically, meaningful for GM/IM rows.");
-        System.out.println("  vipsPeak (MB): peak of libvips' own vips_tracked_get_mem() - a secondary, vips-only figure that");
-        System.out.println("  UNDERCOUNTS true memory (misses libjpeg/libpng/libwebp's own scratch buffers); use totalMB for");
-        System.out.println("  an actual total, this for \"how much image data is libvips itself holding\".");
-        System.out.println("  cpu%: JVM+children CPU time / (wall time * cores)");
-        System.out.println("  overlap = (fetch+process+upload)/total; >1.0 means I/O overlapped compute (streaming variants only)");
-        System.out.println("  p50/p95/p99/max in ms, pooled over " + (results.isEmpty() ? 0 : results.get(0).latencySampleCount()) + " samples (measured reps x queue size)");
+//        System.out.println("  drain(s)/±sd: mean/stddev drain time across measured reps; thru/s: successful keys drained");
+//        System.out.println("  per second of measured wall time (failed jobs are NOT counted as throughput).");
+//        System.out.println("  GM/IM 'process' time includes a `gm identify`/metadata-read fork before the resize -");
+//        System.out.println("  vips gets dimensions free from the decode header, so this column is not resize-only for GM/IM.");
+//        System.out.println("  totalMB: peak total memory (harness process + any forked children) for THIS variant alone -");
+//        System.out.println("  trustworthy for every engine since each variant now runs in its own isolated child JVM");
+//        System.out.println("  (see Main.runIsolated()), so it can't be contaminated by memory an earlier variant left behind.");
+//        System.out.println("  MB/thru = totalMB / (thru/s): memory needed to sustain this rate of throughput - the right column");
+//        System.out.println("  for a memory-EFFICIENCY claim between engines, since a faster engine that does more work in the");
+//        System.out.println("  same peak-memory window earns a lower number here even at equal totalMB. Deliberately NOT");
+//        System.out.println("  totalMB/(jobs completed) - that has no time term, so it shrinks arbitrarily as measuredReps/");
+//        System.out.println("  queueSize grow even though the actual peak concurrency never changes; dividing by throughput");
+//        System.out.println("  (jobs/TIME) keeps the time and volume dimensions correctly coupled.");
+//        System.out.println("  totalMB/rssChild are PSS (proportional set size), NOT raw RSS - GM/IM's children are 8 separate");
+//        System.out.println("  processes mapping the same shared libraries (libjpeg, libGraphicsMagick, glibc); summing raw RSS");
+//        System.out.println("  across siblings would count each shared page once PER PROCESS (~8x), while vips' single process");
+//        System.out.println("  never had that inflation - PSS divides shared pages by mapper count so neither engine's number is");
+//        System.out.println("  penalized by its own concurrency model (multi-process vs multi-threaded-in-one-process).");
+//        System.out.println("  rssChild (MB): peak (PSS) memory of forked gm/convert children specifically, meaningful for GM/IM rows.");
+//        System.out.println("  vipsPeak (MB): peak of libvips' own vips_tracked_get_mem() - a secondary, vips-only figure that");
+//        System.out.println("  UNDERCOUNTS true memory (misses libjpeg/libpng/libwebp's own scratch buffers); use totalMB for");
+//        System.out.println("  an actual total, this for \"how much image data is libvips itself holding\".");
+//        System.out.println("  cpu%: JVM+children CPU time / (wall time * cores)");
+//        System.out.println("  overlap = (fetch+process+upload)/total; >1.0 means I/O overlapped compute (streaming variants only)");
+//        System.out.println("  p50/p95/p99/max in ms, pooled over " + (results.isEmpty() ? 0 : results.get(0).latencySampleCount()) + " samples (measured reps x queue size)");
     }
 }
