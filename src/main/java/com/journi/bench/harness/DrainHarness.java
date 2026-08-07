@@ -52,24 +52,30 @@ public final class DrainHarness {
         int workers = variant.workerCount(cfg);
         int totalReps = cfg.warmupReps() + cfg.measuredReps();
 
-        // This baseline is now trustworthy - Main only ever calls run() ONCE per process (each
-        // variant is its own child JVM, spawned fresh by Main.runIsolated() - see its doc). That
-        // was NOT always true: this harness used to run all six variants back-to-back inside one
-        // shared JVM, and since free() does not return memory to the OS (glibc keeps it in the
-        // allocator's free lists), a later variant's baseline would already sit at whatever level
-        // an EARLIER variant left behind - reusing those same free lists, barely growing RSS, and
-        // reporting a near-zero peak that had nothing to do with how much memory the variant
-        // actually used. Per-process isolation removes that failure mode entirely: this baseline
-        // is just this variant's own bare JVM startup cost (classloading, thread stacks, initial
-        // metaspace), captured before any of its own work has run.
+        // This baseline is now trustworthy across VARIANTS - Main only ever calls run() ONCE per
+        // process (each variant is its own child JVM, spawned fresh by Main.runIsolated() - see
+        // its doc). That was NOT always true: this harness used to run all six variants back-to-
+        // back inside one shared JVM, and since free() does not return memory to the OS (glibc
+        // keeps it in the allocator's free lists), a later variant's baseline would already sit
+        // at whatever level an EARLIER variant left behind - reusing those same free lists,
+        // barely growing RSS, and reporting a near-zero peak that had nothing to do with how much
+        // memory the variant actually used. Per-process isolation removes that cross-variant
+        // failure mode entirely.
+        //
+        // But the SAME glibc behavior can still contaminate a baseline captured at the wrong
+        // point WITHIN one variant's own run: RSS only ever grows for the life of a process, so a
+        // baseline taken before WARMUP reps would fold their one-time cold-start cost (JIT not
+        // yet compiled, classes still loading, first-touch allocation of buffers later reps just
+        // reuse) into "how much memory this variant's MEASURED work needed" - inflating the
+        // isolated figure with a warmup artifact the measured reps never repeat. So this baseline
+        // is captured after warmup has already run, right before the first measured rep's own
+        // jobs start - see the capture site inside the loop below.
         //
         // vipsTrackedPeakKb remains a useful secondary figure for the vips variants - it's
         // libvips' own live allocation counter, so it isolates "how much image data libvips
         // itself is holding" even from JVM heap noise - but it is no longer the ONLY trustworthy
         // number; peakSelfKb/peakTotalKb below are real per-variant totals now, for every engine.
-        System.gc();
-        Thread.sleep(50);
-        long baselineSelfKb = rssSampler.currentSelfKb();
+        long baselineSelfKb = -1;
 
         List<Double> drainSecondsMeasured = new ArrayList<>();
         List<JobResult> measuredResults = Collections.synchronizedList(new ArrayList<>());
@@ -97,6 +103,13 @@ public final class DrainHarness {
                 int repIndex = rep;
 
                 if (measured) {
+                    if (baselineSelfKb < 0) {
+                        // First measured rep: warmup has already run, so this reflects whatever
+                        // level RSS settled at AFTER warmup's cold-start cost, not before it.
+                        System.gc();
+                        Thread.sleep(50);
+                        baselineSelfKb = rssSampler.currentSelfKb();
+                    }
                     rssSampler.resetPeaks();
                     vipsMem.resetPeak();
                 }
@@ -223,9 +236,12 @@ public final class DrainHarness {
         // overhead common to every variant, not the variant's raw process footprint (see the
         // baseline capture above - now trustworthy since each variant gets its own process).
         // Children are this variant's own forked processes - never present at baseline - so
-        // peakChildrenKb needs no adjustment.
-        long peakSelfKbIsolated = Math.max(0, peakSelfKb - baselineSelfKb);
-        long peakTotalKbIsolated = Math.max(peakChildrenKb, peakTotalKb - baselineSelfKb);
+        // peakChildrenKb needs no adjustment. baselineSelfKb only stays -1 if cfg.measuredReps()
+        // is 0, a degenerate config nothing else here supports either (drainSecondsMeasured would
+        // also be empty) - treat it as "no baseline to subtract" rather than corrupt the maths.
+        long safeBaselineKb = Math.max(0, baselineSelfKb);
+        long peakSelfKbIsolated = Math.max(0, peakSelfKb - safeBaselineKb);
+        long peakTotalKbIsolated = Math.max(peakChildrenKb, peakTotalKb - safeBaselineKb);
 
         return new DrainStats(
             variant.name(), workers, keys.size(),

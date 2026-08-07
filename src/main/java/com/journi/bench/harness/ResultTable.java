@@ -47,7 +47,12 @@ public final class ResultTable {
         System.out.println("  totalMB: peak total memory (harness process + any forked children) for THIS variant alone -");
         System.out.println("  trustworthy for every engine since each variant now runs in its own isolated child JVM");
         System.out.println("  (see Main.runIsolated()), so it can't be contaminated by memory an earlier variant left behind.");
-        System.out.println("  rssChild (MB): peak RSS of forked gm/convert children specifically, meaningful for GM/IM rows.");
+        System.out.println("  totalMB/rssChild are PSS (proportional set size), NOT raw RSS - GM/IM's children are 8 separate");
+        System.out.println("  processes mapping the same shared libraries (libjpeg, libGraphicsMagick, glibc); summing raw RSS");
+        System.out.println("  across siblings would count each shared page once PER PROCESS (~8x), while vips' single process");
+        System.out.println("  never had that inflation - PSS divides shared pages by mapper count so neither engine's number is");
+        System.out.println("  penalized by its own concurrency model (multi-process vs multi-threaded-in-one-process).");
+        System.out.println("  rssChild (MB): peak (PSS) memory of forked gm/convert children specifically, meaningful for GM/IM rows.");
         System.out.println("  vipsPeak (MB): peak of libvips' own vips_tracked_get_mem() - a secondary, vips-only figure that");
         System.out.println("  UNDERCOUNTS true memory (misses libjpeg/libpng/libwebp's own scratch buffers); use totalMB for");
         System.out.println("  an actual total, this for \"how much image data is libvips itself holding\".");

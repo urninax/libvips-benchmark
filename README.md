@@ -115,12 +115,21 @@ predictions of real S3 behavior. A confirmation run against real S3 (point
   (GM, IM, vips b0-b3) runs in its own child JVM process, spawned fresh by
   the top-level orchestrator (`Main.run-variant`), specifically so this
   number is trustworthy: earlier, all six shared one continuous JVM and a
-  vips variant's peak RSS was contaminated by whatever GM/IM (or an earlier
-  vips variant) had already left resident - glibc doesn't return freed
-  memory to the OS, so a shared-process baseline-and-subtract approach
+  vips variant's peak memory was contaminated by whatever GM/IM (or an
+  earlier vips variant) had already left resident - glibc doesn't return
+  freed memory to the OS, so a shared-process baseline-and-subtract approach
   cannot isolate a later variant's own memory use. Per-process isolation
-  removes that failure mode entirely. `rssChild`/`vipsPeak` remain as
-  secondary, engine-specific figures (forked gm/convert RSS; libvips' own
+  removes that failure mode entirely, and the baseline is captured AFTER
+  warmup rather than before it, so warmup's own one-time JIT/cold-start
+  cost isn't folded into "what the measured reps needed" either.
+  Measured as **PSS** (proportional set size, via `/proc/<pid>/smaps_rollup`),
+  not raw RSS - GM/IM's children are 8 separate processes mapping the same
+  shared libraries (libjpeg, libGraphicsMagick, glibc), and summing raw RSS
+  across siblings would count every shared page once per process (~8x
+  inflation); PSS divides shared pages by their mapper count, so GM/IM's
+  multi-process concurrency model isn't penalized by a measurement artifact
+  relative to vips' single-process one. `rssChild`/`vipsPeak` remain as
+  secondary, engine-specific figures (forked gm/convert PSS; libvips' own
   tracked-allocation counter, which undercounts codec scratch memory) - see
   `ResultTable`'s footer for exactly what each measures.
 - **Per-job latency percentiles** (p50/p95/p99/max), pooled across measured reps
