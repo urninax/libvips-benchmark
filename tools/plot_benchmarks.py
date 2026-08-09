@@ -26,9 +26,9 @@ actually decision-relevant:
   vips_startup_overhead.png  libvips in-process vs the same op through the CLI
                              (only when a run included the `vipscli` engine)
 
-Deliberately NOT charted: stddev/MAD (already drawn as error bars), warmup times
-and exit codes (diagnostics), and output file sizes - the last is a *validity
-gate*, not a metric, and is surfaced as a hatched bar + footnote instead.
+Deliberately NOT charted: stddev/MAD (already drawn as error bars), warmup times,
+exit codes, and output file sizes (diagnostics - see printValidityGates in
+LocalResizeBenchmark.java for the size-equivalence check on the text side).
 
 Usage:
   ./tools/plot_benchmarks.py results-ffm/jpg
@@ -265,15 +265,6 @@ def annotate_bars(ax, rects, unit="s", font_size=8.5, prefix=""):
                     ha="center", va="bottom", fontsize=font_size, fontweight="bold")
 
 
-def size_mismatch(a, b, tolerance=0.10):
-    """True when the two engines' outputs differ enough that encoder settings are
-    not comparable - the row is then measuring whose default compression effort is
-    lower, not which library is faster."""
-    if not a or not b or a["output_bytes"] < 0 or b["output_bytes"] < 0 or a["output_bytes"] == 0:
-        return False
-    return abs(b["output_bytes"] - a["output_bytes"]) / a["output_bytes"] > tolerance
-
-
 def time_chart(grouped, source, title, out_path):
     ops, base_rows, vips_rows, vips_keys = [], [], [], set()
     for op, by_engine in grouped.items():
@@ -288,13 +279,12 @@ def time_chart(grouped, source, title, out_path):
     if not ops:
         return None
 
-    flagged = [size_mismatch(b, v) for b, v in zip(base_rows, vips_rows)]
     labels = []
-    for op, b, v, flag in zip(ops, base_rows, vips_rows, flagged):
+    for op, b, v in zip(ops, base_rows, vips_rows):
         ratio = b["mean"] / v["mean"] if v["mean"] else 0
         # "0.54x faster" is nonsense - say slower when it is slower.
         verdict = f"{ratio:.2f}x faster" if ratio >= 1 else f"{1 / ratio:.2f}x SLOWER" if ratio else "n/a"
-        labels.append(f"{short_label(op)}\n{verdict}" + (" *" if flag else ""))
+        labels.append(f"{short_label(op)}\n{verdict}")
 
     x = np.arange(len(ops))
     width = 0.35
@@ -308,9 +298,6 @@ def time_chart(grouped, source, title, out_path):
     r2 = ax.bar(x + width / 2, [r["mean"] for r in vips_rows], width,
                 yerr=[r["stddev"] for r in vips_rows], color=vips_colors,
                 capsize=4, edgecolor="black", linewidth=0.5)
-    for bar, flag in zip(list(r1) + list(r2), flagged + flagged):
-        if flag:
-            bar.set_hatch("//")
 
     ax.set_title(f"{title}\nSource: {source}", fontsize=13, fontweight="bold", pad=14)
     ax.set_xticks(x)
@@ -324,12 +311,6 @@ def time_chart(grouped, source, title, out_path):
     handles = [mpatches.Patch(facecolor=DISPLAY[e][1], label=DISPLAY[e][0],
                               edgecolor="black", linewidth=0.5)
                for e in ("gm", "im", "vips", "vipscli") if e in engines_present]
-    if any(flagged):
-        # Keep the caveat attached to the marker rather than as a corner note, so the
-        # hatching can never appear unexplained.
-        handles.append(mpatches.Patch(facecolor="white", hatch="//", edgecolor="black",
-                                      linewidth=0.5,
-                                      label="* output sizes differ >10% — speedup unvalidated"))
     ax.legend(handles=handles, fontsize=10, frameon=True, facecolor="white", edgecolor="none")
 
     fig.tight_layout()
