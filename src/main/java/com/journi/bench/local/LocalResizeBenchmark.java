@@ -12,6 +12,7 @@ import com.journi.bench.ImageFormat;
 import com.journi.bench.metrics.RssSampler;
 import com.journi.bench.metrics.VipsTrackedMemory;
 import com.journi.bench.variant.GmStandardVariant;
+import com.journi.bench.variant.ImBleedVariant;
 import com.journi.bench.variant.ProcessRunner;
 
 import java.io.IOException;
@@ -22,6 +23,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -310,7 +312,8 @@ public final class LocalResizeBenchmark {
         String bleedLabel = bleedW + "x" + bleedH;
         if (engines.contains("im")) {
             Path out = imDir.resolve("bleed." + bleedFormat.ext);
-            List<String> argv = imBleed(bleedW, bleedH, src, iccStr, orig, out, bleedFormat);
+            List<String> argv = imBleed(bleedW, bleedH, src, iccStr, orig, out,
+                sourceFormatOf(srcLoader), bleedFormat);
             bleed.add(new LocalCase("IM   bleed page " + bleedLabel + " (" + bleedFmtLabel + ", mirror-extend " + BLEED_PX + "px)",
                 "im", out, () -> ProcessRunner.run(argv, rss, PROCESS_TIMEOUT_SECONDS)));
         }
@@ -371,7 +374,12 @@ public final class LocalResizeBenchmark {
         rss.stop();
         vipsMem.stop();
 
-        printValidityGates(all);
+        // Case name -> the file it wrote, so the gate can read back band counts (CaseResult only
+        // carries a byte size).
+        Map<String, Path> outputs = new java.util.HashMap<>();
+        for (LocalCase c : standard) if (c.output() != null) outputs.put(c.name(), c.output());
+        for (LocalCase c : bleed) if (c.output() != null) outputs.put(c.name(), c.output());
+        printValidityGates(all, outputs);
 
         System.out.println();
         System.out.println("Charts:  python3 tools/plot_benchmarks.py " + formatDir);
@@ -442,16 +450,43 @@ public final class LocalResizeBenchmark {
      *   not a benchmark artifact. Only WebP trips the 10% gate; the same softening is present in
      *   every row (jpg +4.9%, png -3.9%, webp +11.3%), WebP simply being the most sensitive codec.
      *
-     * - The bleed case's PNG output (BENCH_OUTPUT_FORMAT=png) trips the same gate for a THIRD,
-     *   unrelated reason: IM's `-type truecolormatte` (see imBleed()/ImBleedVariant.bleedCommand())
-     *   forces RGBA whenever the output format CAN carry alpha, regardless of whether the source
-     *   actually has any - so an opaque JPEG source still gets a full, wasted alpha band. Confirmed
-     *   via `vipsheader -a`: IM's bleed.png is bands=4, vips' is bands=3, because the vips path only
-     *   adds/keeps alpha when the source has it (see the bleed case's flatten guard). That 4th band
-     *   is most of an ~18% size gap on this fixture. This is faithful to production's own
-     *   ImageMagickClient command shape, not a bug in either path - report it as such.
+     * - The bleed case's PNG output trips the same gate for a THIRD, unrelated reason: BAND COUNT.
+     *   IM emits bands=4, vips emits bands=3 for an opaque source, and that 4th band is most of the
+     *   gap.
+     *
+     *   CORRECTED: an earlier version of this comment blamed IM's `-type truecolormatte` and called
+     *   it "faithful to production's own ImageMagickClient command shape". Both halves were wrong.
+     *   Production emits `truecolormatte` NOWHERE, in either client - it was invented by this
+     *   benchmark. What production's ImageMagickClient actually emits for a PNG-sourced job is
+     *   `-define png:color-type=6`, i.e. PNG colour type 6 = RGBA. So the RGBA output IS production
+     *   behaviour, but it arrives via the encoder rather than via an in-memory image conversion,
+     *   and it is keyed on the SOURCE format rather than the output format. Both are now fixed;
+     *   see ImBleedVariant.imQualityFlags().
+     *
+     *   vips is deliberately NOT changed to match. It writes alpha only when the source actually
+     *   has some - verified correct end to end: on an RGBA source both engines produce bands=4 with
+     *   matching alpha (avg 97.0 vs 97.2) and a correctly transparent mirrored bleed border (border
+     *   alpha avg 0.5 vs 0.5). On an opaque source vips writes bands=3 and IM writes a wasted
+     *   all-opaque alpha band. Forcing vips to emit that band for parity would mean deliberately
+     *   writing bytes carrying no information, so the gate explains the difference instead of the
+     *   code hiding it.
+     *
+     *   Note that once the IM flags were made production-faithful, a JPEG-sourced png bleed no
+     *   longer differs in bands at all (production's Jpeg branch is `-alpha remove -type
+     *   truecolor`, so bands=3 on both sides) - the alpha divergence only shows up for a
+     *   PNG-sourced job, where production really does ask for colour type 6.
+     *
+     * - A CAUTION for whoever extends this gate: the residual ~12% on the JPEG-sourced png bleed
+     *   row is NOT the `-size` prefilter, even though that is the reflex explanation. Measured:
+     *   vips' output has HIGHER high-frequency energy (18.293 vs IM's 15.857) yet is SMALLER
+     *   (11.34MB vs 12.86MB) - the exact opposite of the prefilter signature. Nor is it filtering:
+     *   re-encoding IM's own pixels with vips' filter=248 gives 13.15MB, still above vips' 11.34MB,
+     *   so the gap is in the pixels. Unexplained as of this writing; a likely lead is IM being a
+     *   Q16 build (`convert -version`) writing 8-bit PNG, where quantum down-conversion can add
+     *   low-bit noise that a lossless codec cannot squeeze. Do not let the gate assert a cause it
+     *   has not measured - that mistake has already been made twice in this file.
      */
-    private static void printValidityGates(List<HyperfineExport.CaseResult> all) {
+    private static void printValidityGates(List<HyperfineExport.CaseResult> all, Map<String, Path> outputs) {
         System.out.println();
         System.out.println("---- validity gates ----");
         boolean any = false;
@@ -466,37 +501,98 @@ public final class LocalResizeBenchmark {
         for (String suffix : List.of("thumb", "mobileFull ", "mobileFullWebp", "mobileFullPng", "original", "bleed")) {
             Long gm = null, vips = null;
             String gmName = null, vipsName = null;
+            Path gmOut = null, vipsOut = null;
             for (HyperfineExport.CaseResult r : all) {
                 if (!r.name().contains(suffix) || r.outputBytes() < 0) continue;
-                if (r.engine().equals("gm") || r.engine().equals("im")) { gm = r.outputBytes(); gmName = r.name(); }
-                if (r.engine().equals("vips")) { vips = r.outputBytes(); vipsName = r.name(); }
+                if (r.engine().equals("gm") || r.engine().equals("im")) {
+                    gm = r.outputBytes(); gmName = r.name(); gmOut = outputs.get(r.name());
+                }
+                if (r.engine().equals("vips")) {
+                    vips = r.outputBytes(); vipsName = r.name(); vipsOut = outputs.get(r.name());
+                }
             }
             if (gm != null && vips != null && gm > 0) {
+                // BAND COUNT IS CHECKED INDEPENDENTLY OF THE SIZE THRESHOLD, on purpose. A channel
+                // mismatch is an output-SHAPE difference and matters even when the byte totals
+                // happen to land close: an opaque-PNG-sourced bleed produced IM=4 bands vs vips=3
+                // at only -8.8% size delta, which the old size-gated check reported as nothing at
+                // all. Silence there is worse than a slightly noisier gate.
+                int gmBands = bandsOf(gmOut), vipsBands = bandsOf(vipsOut);
+                boolean bandsDiffer = gmBands > 0 && vipsBands > 0 && gmBands != vipsBands;
+                if (bandsDiffer) {
+                    any = true;
+                    System.out.printf(Locale.ROOT,
+                        "WARNING [%s]: BAND COUNTS DIFFER — %s wrote %d bands, %s wrote %d "
+                        + "(size delta %+.0f%%).%n",
+                        suffix.trim(), engineOf(gmName), gmBands, engineOf(vipsName), vipsBands,
+                        100.0 * (vips - gm) / gm);
+                    System.out.println("  GM/IM write the extra channel because production asks for it: GM's Png branch is");
+                    System.out.println("  `-define png:filter-type=6 -background none`, IM's is `-define png:color-type=6`");
+                    System.out.println("  — PNG colour type 6 is RGBA, so IM adds an alpha channel at ENCODE time whether");
+                    System.out.println("  the pixels need one or not. vips writes alpha only when the SOURCE actually has");
+                    System.out.println("  some. vips is the correct one here and is deliberately left alone: on an opaque");
+                    System.out.println("  source that 4th band is pure overhead in the GM/IM output, not missing data in");
+                    System.out.println("  vips'. On a genuinely transparent source both engines emit 4 bands and agree");
+                    System.out.println("  (verified: alpha avg 97.0 vs 97.2, transparent bleed border on both).");
+                    System.out.println("  Consequence for the migration: a libvips port would stop emitting that band, so");
+                    System.out.println("  PNG output gets smaller — but anything downstream asserting RGBA would notice.");
+                }
+
                 double delta = Math.abs(vips - gm) / (double) gm;
                 if (delta > 0.10) {
                     any = true;
                     System.out.printf(Locale.ROOT,
                         "WARNING [%s]: outputs are not equivalent — sizes differ by %.0f%% "
-                        + "(%s=%dKB vs %s=%dKB).%n"
-                        + "  Two known, understood causes so far (see this method's doc for the full "
-                        + "derivation of each) -%n"
-                        + "  neither is a benchmark artifact, both are production's real behaviour:%n"
-                        + "  * JPEG source: GM/IM's `-size` DCT scaled decode low-passes the image "
-                        + "before Lanczos runs,%n"
-                        + "    shipping a softer, smaller file at the same nominal quality.%n"
-                        + "  * PNG/WebP bleed output: IM's `-type truecolormatte` forces an RGBA band "
-                        + "even on an opaque%n"
-                        + "    source, while vips only adds alpha when the source actually has it "
-                        + "(check bands via%n"
-                        + "    `vipsheader -a` on each output before assuming which cause applies "
-                        + "here).%n"
-                        + "  Either way: treat this as an output-quality/shape difference to accept, "
-                        + "not a speedup to discount.%n",
+                        + "(%s=%dKB vs %s=%dKB).%n",
                         suffix.trim(), delta * 100, gmName, gm / 1024, vipsName, vips / 1024);
+                    if (bandsDiffer) {
+                        System.out.println("  See the band-count warning above — that is likely most of this gap.");
+                    } else {
+                        // Deliberately lists candidates instead of naming one. Asserting a cause
+                        // here has already been wrong twice in this file's history, and the two
+                        // known causes have OPPOSITE signatures - run the two checks below rather
+                        // than guessing from the size delta alone.
+                        System.out.println("  Band counts match, so this is a pixel or compression difference, not a channel one.");
+                        System.out.println("    Known candidates, which do NOT look alike — measure, do not assume:");
+                        System.out.println("    * GM/IM's `-size` DCT scaled decode (JPEG sources): low-passes before Lanczos,");
+                        System.out.println("      so GM/IM comes out SOFTER and, in a lossy codec, SMALLER.");
+                        System.out.println("    * Encoder filter/quantum-depth differences: can move size with little or no");
+                        System.out.println("      change in sharpness, and in a lossless codec can even make the SHARPER");
+                        System.out.println("      output the smaller one (measured on the jpeg-sourced png bleed row: vips");
+                        System.out.println("      sharper at HF 18.293 vs 15.857, yet 11.34MB vs 12.86MB).");
+                        System.out.println("    Two cheap checks that separate them: compare high-frequency energy (std-dev of");
+                        System.out.println("    a Laplacian) on both outputs, and re-encode one engine's pixels with the other's");
+                        System.out.println("    encoder settings — if the size gap survives that, it is the pixels.");
+                    }
+                    System.out.println("  Either way this is production's real behaviour, not a benchmark artifact — an");
+                    System.out.println("  output-shape difference to accept, not a speedup to discount.");
                 }
             }
         }
         if (!any) System.out.println("all gates passed");
+    }
+
+    /** "GM   thumb 320x569 (jpg q85)" -> "GM". Just the engine token, for compact gate output. */
+    private static String engineOf(String caseName) {
+        String t = caseName.trim();
+        int sp = t.indexOf(' ');
+        return sp < 0 ? t : t.substring(0, sp);
+    }
+
+    /**
+     * Band count of a written output, read back through libvips. -1 when unreadable, so the gate
+     * degrades to its pixel/compression explanation rather than printing a bogus channel claim.
+     */
+    private static int bandsOf(Path p) {
+        if (p == null || !Files.isRegularFile(p)) return -1;
+        try (Arena a = Arena.ofConfined()) {
+            // vips-ffm 1.9.8 has no getBands() - read the header field, same one `vipsheader -f
+            // bands` reports. Integer, so null-guard rather than unbox blindly.
+            Integer bands = VImage.newFromFile(a, p.toString()).getInt("bands");
+            return bands == null ? -1 : bands;
+        } catch (Exception e) {
+            return -1;
+        }
     }
 
     // ---- GM / IM / vips-CLI argv (verbatim from benchmark_resize.sh) -------
@@ -535,24 +631,20 @@ public final class LocalResizeBenchmark {
             "-colorspace", "RGB", "-quality", "85", "jpg:" + out);
     }
 
-    /** Format-conditional quality/alpha handling ported from ImBleedVariant.bleedCommand() - see its doc. */
+    /**
+     * Quality/alpha flags come from ImBleedVariant.imQualityFlags() and are keyed on the SOURCE
+     * format, matching ImageMagickClient - see that method's doc. The OUTPUT format still selects
+     * the encoder (the `<fmt>:` prefix on the target), so BENCH_OUTPUT_FORMAT continues to control
+     * what gets written; it just no longer (incorrectly) drives the quality flags too.
+     */
     private static List<String> imBleed(int bleedW, int bleedH, String src, String icc, int[] orig, Path out,
-                                        ImageFormat outputFormat) {
+                                        ImageFormat sourceFormat, ImageFormat outputFormat) {
         // Plain concatenation, NOT String.format - "%" here is IM's literal fx-expression syntax
         // and must stay a single '%' on one argv element (same as ImBleedVariant.bleedCommand()).
         String viewport = "%[fx:w+" + (2 * BLEED_PX) + "]x%[fx:h+" + (2 * BLEED_PX) + "]-" + BLEED_PX + "-" + BLEED_PX;
         List<String> cmd = new ArrayList<>(List.of("convert", "-size", bleedW + "x" + bleedH, src,
             "-auto-orient", "-profile", icc, "-strip", "-colorspace", "sRGB"));
-        if (outputFormat.supportsQuality) {
-            cmd.addAll(List.of("-quality", "85"));
-        }
-        if (outputFormat.supportsAlpha) {
-            // "-background none" so the mirror-extend fills with transparent, not opaque -
-            // without it the canvas silently loses its alpha channel even with truecolormatte set.
-            cmd.addAll(List.of("-type", "truecolormatte", "-background", "none"));
-        } else {
-            cmd.addAll(List.of("-alpha", "remove", "-type", "truecolor", "-background", "white"));
-        }
+        cmd.addAll(ImBleedVariant.imQualityFlags(sourceFormat));
         cmd.addAll(List.of(
             "-resize", orig[0] + "x" + orig[1] + "^",
             "-gravity", "center", "-virtual-pixel", "Mirror",
@@ -560,6 +652,20 @@ public final class LocalResizeBenchmark {
             "-distort", "SRT", "0",
             outputFormat.ext + ":" + out));
         return cmd;
+    }
+
+    /**
+     * Maps libvips' loader name to the ImageFormat production's readBasicImageInfo would report.
+     * Derived from the DECODED image (vips-loader), not the filename - production reads the real
+     * format too, and an extension can lie. HEIC/AVIF route to WEBP's flag set here purely because
+     * production gives Heic/Heif/Webp byte-identical flags ("-quality 85 -background none") and
+     * ImageFormat has no HEIC member.
+     */
+    private static ImageFormat sourceFormatOf(String vipsLoader) {
+        String l = vipsLoader == null ? "" : vipsLoader.toLowerCase(Locale.ROOT);
+        if (l.startsWith("jpeg") || l.startsWith("jpg")) return ImageFormat.JPG;
+        if (l.startsWith("png")) return ImageFormat.PNG;
+        return ImageFormat.WEBP; // webpload, heifload - same production flags
     }
 
     /** vips-ffm side of imBleed()'s format toggle - same three formats saveToTarget() in VipsStreamingVariant supports. */

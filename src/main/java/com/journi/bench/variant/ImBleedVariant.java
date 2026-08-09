@@ -154,20 +154,7 @@ public final class ImBleedVariant implements Variant {
             "-auto-orient",
             "-profile", iccPath.toString(),
             "-strip", "-colorspace", "sRGB"));
-        if (outputFormat.supportsQuality) {
-            cmd.addAll(List.of("-quality", "85"));
-        }
-        if (outputFormat.supportsAlpha) {
-            // Preserve alpha - "-background none" is required so the later -extent (which fills
-            // the bleed border) fills with transparent rather than opaque, which would otherwise
-            // silently flatten the whole canvas (verified: without this, output has no alpha
-            // channel at all even with -type truecolormatte set).
-            cmd.addAll(List.of("-type", "truecolormatte", "-background", "none"));
-        } else {
-            // JPEG has no alpha - composite onto white first, mirrors production's IM command
-            // (a no-op for opaque sources; only matters for alpha-channel input like PNG/WebP).
-            cmd.addAll(List.of("-alpha", "remove", "-type", "truecolor", "-background", "white"));
-        }
+        cmd.addAll(imQualityFlags(inputFormat));
         cmd.addAll(List.of(
             "-resize", contentW + "x" + contentH + "^",
             "-virtual-pixel", "Mirror",
@@ -176,6 +163,43 @@ public final class ImBleedVariant implements Variant {
             "-gravity", "center", "-extent", fullW + "x" + fullH,
             outputFormat.ext + ":" + out));
         return cmd;
+    }
+
+    /**
+     * IM's quality/alpha flags, verbatim from ImageMagickClient's `quality`.
+     *
+     * KEYED ON THE SOURCE FORMAT, NOT THE OUTPUT FORMAT. This is a real asymmetry between the two
+     * production clients and it is easy to get wrong: GraphicsMagickClient switches on the OUTPUT
+     * format (see GmStandardVariant.gmCommand()), ImageMagickClient switches on the SOURCE. An
+     * earlier version of this method keyed on the output format, so a JPEG source going to PNG
+     * picked a PNG branch production would never have used for it.
+     *
+     *   Jpeg + sRGB -> "-quality 85 -alpha remove -type truecolor"
+     *   Jpeg + Gray -> "-quality 85 -alpha remove"                  (NOT modelled - see below)
+     *   Png         -> "-define png:color-type=6 -background none"
+     *   Webp        -> "-quality 85 -background none"
+     *   Heic/Heif   -> "-quality 85 -background none"
+     *
+     * png:color-type=6 is PNG colour type 6, i.e. RGBA - a BAND-COUNT setting, so production's IM
+     * writes an alpha channel for any PNG-sourced job whether or not the pixels need one. It is
+     * NOT GM's png:filter-type=6, which is adaptive row filtering (a compression setting). Two
+     * different options that both happen to be "=6"; production sets one in each client.
+     *
+     * `-type truecolormatte` used to be emitted here for alpha-capable OUTPUT formats. Production
+     * never emits it anywhere, and it is measurably more expensive than what production does run:
+     * it converts the in-memory image to RGBA so a 4th band rides through the resize AND the
+     * -distort, where png:color-type=6 only affects the final encode. Measured on a PNG-source
+     * bleed: 6464ms/13923182B with truecolormatte vs 6031ms/13337871B with png:color-type=6.
+     *
+     * NOT MODELLED: the ColorSpace.Gray variant of the Jpeg branch (it drops `-type truecolor`).
+     * Every fixture here is sRGB, so only the sRGB branch is reachable.
+     */
+    public static List<String> imQualityFlags(ImageFormat sourceFormat) {
+        return switch (sourceFormat) {
+            case JPG -> List.of("-quality", "85", "-alpha", "remove", "-type", "truecolor");
+            case PNG -> List.of("-define", "png:color-type=6", "-background", "none");
+            case WEBP -> List.of("-quality", "85", "-background", "none");
+        };
     }
 
     private static void deleteQuietly(Path p) {

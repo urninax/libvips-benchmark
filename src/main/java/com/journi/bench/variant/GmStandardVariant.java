@@ -190,16 +190,32 @@ public final class GmStandardVariant implements Variant {
             "-auto-orient",
             "-profile", iccPath.toString(),
             "-strip", "-colorspace", "RGB"));
-        if (outputFormat.supportsQuality) {
-            cmd.addAll(List.of("-quality", "85"));
-        }
-        if (outputFormat.supportsAlpha) {
-            // Preserve any alpha channel the source has - PNG/WebP output can carry it.
-            cmd.addAll(List.of("-type", "truecolormatte"));
-        } else {
-            // JPEG has no alpha - composite onto white first, mirrors production's GM command
-            // (a no-op for opaque sources; only matters for alpha-channel input like PNG/WebP).
-            cmd.addAll(List.of("-type", "truecolor", "-background", "#ffffff", "-flatten"));
+        // Verbatim from GraphicsMagickClient's `quality`, which switches on the OUTPUT format
+        // (unlike ImageMagickClient's, which switches on the SOURCE format - see
+        // ImBleedVariant.imQualityFlags()):
+        //
+        //   Jpeg + sRGB -> "-quality 85 -type truecolor -background \"#ffffff\" -flatten"
+        //   Jpeg + Gray -> "-quality 85"                       (NOT modelled - see below)
+        //   Png         -> "-define png:filter-type=6 -background none"
+        //   Webp        -> "-quality 85 -background none"
+        //   Heic/Heif   -> "-quality 85 -background none"
+        //
+        // `-type truecolormatte` used to be emitted here for PNG/WebP. Production NEVER emits it,
+        // in either client. It is also not free: converting the in-memory image to RGBA carries a
+        // 4th band through the whole pipeline, measured at +15-18% wall time and +6-7% output
+        // bytes versus `-type truecolor` on an IM bleed.
+        //
+        // NOT MODELLED: production's ColorSpace.Gray branch drops `-type truecolor` for JPEG
+        // output. Every fixture in this repo is sRGB, so only the sRGB branch is reachable here;
+        // a greyscale fixture would need this extended before its numbers meant anything.
+        switch (outputFormat) {
+            case JPG -> cmd.addAll(List.of("-quality", "85",
+                "-type", "truecolor", "-background", "#ffffff", "-flatten"));
+            // png:filter-type=6 is libpng's adaptive per-row filtering, a COMPRESSION setting -
+            // not to be confused with IM's png:color-type=6, which is a band-count setting. GM
+            // sets filtering and leaves the band count alone; IM does the opposite.
+            case PNG -> cmd.addAll(List.of("-define", "png:filter-type=6", "-background", "none"));
+            case WEBP -> cmd.addAll(List.of("-quality", "85", "-background", "none"));
         }
         cmd.addAll(List.of(
             // Lanczos, not Bessel: matches vips' thumbnail default kernel (lanczos3) and the
