@@ -23,7 +23,11 @@ services:
     # infra pinned OFF the cores under test - see BENCH_CPUSET below
     cpuset: "${INFRA_CPUSET:-8-15}"
     tmpfs:
-      - /data:size=2g,mode=1777   # storage I/O ~= 0, isolates CPU + injected network delay as the only variables
+      # 2g was too small for a multi-profile PROFILES="..." sweep: every job across every rep,
+      # every engine and every profile writes a DISTINCT output key (DrainHarness names each
+      # ".repN.jobM.out") and nothing ever deletes old ones within a sweep run - confirmed live,
+      # MinIO returned "no space left on device" partway through the 2nd profile of a run.
+      - /data:size=8g,mode=1777   # storage I/O ~= 0, isolates CPU + injected network delay as the only variables
     healthcheck:
       test: ["CMD", "mc", "ready", "local"]
       interval: 2s

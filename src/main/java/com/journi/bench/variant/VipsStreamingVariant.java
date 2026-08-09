@@ -423,11 +423,21 @@ public final class VipsStreamingVariant implements Variant {
         };
     }
 
+    // Both callbacks catch Throwable, NOT IOException. writeSegment()/finish() are declared
+    // "throws IOException" but that's not enforced for unchecked exceptions - s3.putObject()/
+    // uploadPart() throw S3Exception (RuntimeException -> SdkException -> AwsServiceException),
+    // which sails straight past a narrower catch. Confirmed for real: a MinIO "no space left on
+    // device" mid-sweep threw S3Exception out of finish(), past this catch, through the native
+    // FFM callback boundary, and took the whole JVM down ("Unrecoverable uncaught exception
+    // encountered. The VM will now exit") - every other concurrent job in that process died with
+    // it, not just the one that hit the S3 error. Only the STREAMED-PUT variants (b1/b3) are
+    // exposed to this; buffered-put routes through process()'s own catch (Exception e), which
+    // already catches S3Exception.
     private static VCustomTarget.WriteCallback writeCallback(StreamingPartUploadOutputStream upload) {
         return (MemorySegment seg) -> {
             try {
                 return upload.writeSegment(seg);
-            } catch (IOException e) {
+            } catch (Throwable t) {
                 return -1L;
             }
         };
@@ -438,7 +448,7 @@ public final class VipsStreamingVariant implements Variant {
             try {
                 upload.finish();
                 return 0;
-            } catch (IOException e) {
+            } catch (Throwable t) {
                 return -1;
             }
         };
