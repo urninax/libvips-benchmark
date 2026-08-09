@@ -8,6 +8,7 @@ import app.photofox.vipsffm.enums.VipsExtend;
 import app.photofox.vipsffm.enums.VipsInteresting;
 import app.photofox.vipsffm.enums.VipsSize;
 import com.journi.bench.BenchConfig;
+import com.journi.bench.ImageFormat;
 import com.journi.bench.metrics.RssSampler;
 import com.journi.bench.metrics.VipsTrackedMemory;
 import com.journi.bench.variant.GmStandardVariant;
@@ -43,6 +44,13 @@ import java.util.stream.Collectors;
  * scaled-decode hint) so the two harnesses stay diffable. The GM/IM argv are built inline rather
  * than reusing GmStandardVariant/ImBleedVariant, which are S3-coupled, branch on ImageFormat,
  * still emit `-filter Bessel`, and order flags differently (GM is order-sensitive).
+ * <p>
+ * The bleed case's OUTPUT format is the one exception to "built inline rather than reusing the
+ * S3 variants": it reuses cfg.outputFormat() (BENCH_OUTPUT_FORMAT) rather than a separate local
+ * knob, and its format-conditional quality/alpha handling is ported straight from
+ * ImBleedVariant.bleedCommand() - see imBleed() and the vips bleed case below. The five standard-
+ * resize cases stay fixed to one format each (jpg/webp/png) by design, since they exist to
+ * compare each FORMAT's own encoder settings, not to be re-run across formats.
  */
 public final class LocalResizeBenchmark {
 
@@ -68,6 +76,10 @@ public final class LocalResizeBenchmark {
 
                 Env: LOCAL_WARMUP_RUNS (default 3), LOCAL_MIN_RUNS (default 20),
                      BENCH_ENGINES (default gm,im,vips; add 'vipscli' to also time the vips CLI)
+                     BENCH_OUTPUT_FORMAT (default jpg) - selects the BLEED case's output format
+                       (jpg/png/webp), e.g. BENCH_OUTPUT_FORMAT=png for a png-to-png bleed run.
+                       Only the bleed case honors this; the five standard-resize cases each stay
+                       fixed to their own format so every encoder's own settings stay comparable.
 
                 Running on macOS for local iteration (NOT the target env - the decision-grade
                 numbers come from the linux/amd64 container): vips-ffm looks for Linux .so.42
@@ -289,26 +301,38 @@ public final class LocalResizeBenchmark {
         }
 
         // ---- bleed cases ----
+        // Format is BENCH_OUTPUT_FORMAT (default jpg), NOT the fixed per-case formats the five
+        // standard-resize cases use above - see the class doc for why bleed is the one case that
+        // takes this as a runtime toggle rather than a fixed set of format-specific cases.
+        ImageFormat bleedFormat = cfg.outputFormat();
+        String bleedFmtLabel = bleedFormat.supportsQuality ? bleedFormat.ext + " q85" : bleedFormat.ext;
         List<LocalCase> bleed = new ArrayList<>();
         String bleedLabel = bleedW + "x" + bleedH;
         if (engines.contains("im")) {
-            Path out = imDir.resolve("bleed.jpg");
-            List<String> argv = imBleed(bleedW, bleedH, src, iccStr, orig, out);
-            bleed.add(new LocalCase("IM   bleed page " + bleedLabel + " (jpg q85, mirror-extend " + BLEED_PX + "px)",
+            Path out = imDir.resolve("bleed." + bleedFormat.ext);
+            List<String> argv = imBleed(bleedW, bleedH, src, iccStr, orig, out, bleedFormat);
+            bleed.add(new LocalCase("IM   bleed page " + bleedLabel + " (" + bleedFmtLabel + ", mirror-extend " + BLEED_PX + "px)",
                 "im", out, () -> ProcessRunner.run(argv, rss, PROCESS_TIMEOUT_SECONDS)));
         }
         if (engines.contains("vips")) {
-            Path out = vipsDir.resolve("bleed.jpg");
-            bleed.add(new LocalCase("vips-ffm bleed page " + bleedLabel + " (jpg q85, mirror-extend " + BLEED_PX + "px)",
+            Path out = vipsDir.resolve("bleed." + bleedFormat.ext);
+            bleed.add(new LocalCase("vips-ffm bleed page " + bleedLabel + " (" + bleedFmtLabel + ", mirror-extend " + BLEED_PX + "px)",
                 "vips", out,
                 () -> { try (Arena a = Arena.ofConfined()) {
-                    VImage.thumbnail(a, src, orig[0],
+                    VImage img = VImage.thumbnail(a, src, orig[0],
                             VipsOption.Int("height", orig[1]),
                             VipsOption.Enum("crop", VipsInteresting.INTERESTING_CENTRE),
                             VipsOption.String("export-profile", iccStr))
                         .embed(BLEED_PX, BLEED_PX, bleedW, bleedH,
-                            VipsOption.Enum("extend", VipsExtend.EXTEND_MIRROR))
-                        .jpegsave(out.toString(), VipsOption.Int("Q", 85), VipsOption.Boolean("strip", true));
+                            VipsOption.Enum("extend", VipsExtend.EXTEND_MIRROR));
+                    // Mirrors VipsStreamingVariant.flattenIfNeeded(): only called when the source
+                    // actually has an alpha channel AND the target format can't carry one (JPG) -
+                    // flatten() on an already-opaque image throws (a real libvips quirk, not a
+                    // bug here), so this must stay conditional rather than unconditional.
+                    if (!bleedFormat.supportsAlpha && img.hasAlpha()) {
+                        img = img.flatten(VipsOption.ArrayDouble("background", List.of(255.0, 255.0, 255.0)));
+                    }
+                    saveBleed(img, out.toString(), bleedFormat);
                 }}));
         }
 
@@ -328,7 +352,8 @@ public final class LocalResizeBenchmark {
 
         System.out.println();
         System.out.println("Bleed case — content " + dim(orig) + ", bleed " + BLEED_PX
-            + "px/edge, full canvas " + bleedLabel);
+            + "px/edge, full canvas " + bleedLabel + ", output format " + bleedFormat.ext
+            + " (toggle via BENCH_OUTPUT_FORMAT)");
         List<HyperfineExport.CaseResult> bleedResults = LocalMeasure.measureAll(bleed, warmup, measured, rss, vipsMem, procAvailable);
         HyperfineExport.write(formatDir.resolve("bleed_resize_ffm.md"),
             formatDir.resolve("bleed_resize_ffm.json"), sourceInfo, "Bleed resize", bleedResults);
@@ -416,6 +441,15 @@ public final class LocalResizeBenchmark {
      *   ~5% larger JPEG) at the same nominal quality setting - a real storage/CDN consideration,
      *   not a benchmark artifact. Only WebP trips the 10% gate; the same softening is present in
      *   every row (jpg +4.9%, png -3.9%, webp +11.3%), WebP simply being the most sensitive codec.
+     *
+     * - The bleed case's PNG output (BENCH_OUTPUT_FORMAT=png) trips the same gate for a THIRD,
+     *   unrelated reason: IM's `-type truecolormatte` (see imBleed()/ImBleedVariant.bleedCommand())
+     *   forces RGBA whenever the output format CAN carry alpha, regardless of whether the source
+     *   actually has any - so an opaque JPEG source still gets a full, wasted alpha band. Confirmed
+     *   via `vipsheader -a`: IM's bleed.png is bands=4, vips' is bands=3, because the vips path only
+     *   adds/keeps alpha when the source has it (see the bleed case's flatten guard). That 4th band
+     *   is most of an ~18% size gap on this fixture. This is faithful to production's own
+     *   ImageMagickClient command shape, not a bug in either path - report it as such.
      */
     private static void printValidityGates(List<HyperfineExport.CaseResult> all) {
         System.out.println();
@@ -444,14 +478,20 @@ public final class LocalResizeBenchmark {
                     System.out.printf(Locale.ROOT,
                         "WARNING [%s]: outputs are not equivalent — sizes differ by %.0f%% "
                         + "(%s=%dKB vs %s=%dKB).%n"
-                        + "  For a JPEG source this is usually GM's `-size` DCT scaled decode, which "
-                        + "low-passes the%n"
-                        + "  image before Lanczos runs — GM ships a softer, smaller file at the same "
-                        + "nominal quality.%n"
-                        + "  That is production's real behaviour, not a benchmark artifact (see "
-                        + "printValidityGates' doc),%n"
-                        + "  so treat it as an output-quality difference to accept, not a speedup to "
-                        + "discount.%n",
+                        + "  Two known, understood causes so far (see this method's doc for the full "
+                        + "derivation of each) -%n"
+                        + "  neither is a benchmark artifact, both are production's real behaviour:%n"
+                        + "  * JPEG source: GM/IM's `-size` DCT scaled decode low-passes the image "
+                        + "before Lanczos runs,%n"
+                        + "    shipping a softer, smaller file at the same nominal quality.%n"
+                        + "  * PNG/WebP bleed output: IM's `-type truecolormatte` forces an RGBA band "
+                        + "even on an opaque%n"
+                        + "    source, while vips only adds alpha when the source actually has it "
+                        + "(check bands via%n"
+                        + "    `vipsheader -a` on each output before assuming which cause applies "
+                        + "here).%n"
+                        + "  Either way: treat this as an output-quality/shape difference to accept, "
+                        + "not a speedup to discount.%n",
                         suffix.trim(), delta * 100, gmName, gm / 1024, vipsName, vips / 1024);
                 }
             }
@@ -495,18 +535,42 @@ public final class LocalResizeBenchmark {
             "-colorspace", "RGB", "-quality", "85", "jpg:" + out);
     }
 
-    private static List<String> imBleed(int bleedW, int bleedH, String src, String icc, int[] orig, Path out) {
+    /** Format-conditional quality/alpha handling ported from ImBleedVariant.bleedCommand() - see its doc. */
+    private static List<String> imBleed(int bleedW, int bleedH, String src, String icc, int[] orig, Path out,
+                                        ImageFormat outputFormat) {
         // Plain concatenation, NOT String.format - "%" here is IM's literal fx-expression syntax
         // and must stay a single '%' on one argv element (same as ImBleedVariant.bleedCommand()).
         String viewport = "%[fx:w+" + (2 * BLEED_PX) + "]x%[fx:h+" + (2 * BLEED_PX) + "]-" + BLEED_PX + "-" + BLEED_PX;
-        return List.of("convert", "-size", bleedW + "x" + bleedH, src,
-            "-auto-orient", "-profile", icc, "-strip", "-colorspace", "sRGB",
-            "-quality", "85", "-alpha", "remove", "-type", "truecolor",
+        List<String> cmd = new ArrayList<>(List.of("convert", "-size", bleedW + "x" + bleedH, src,
+            "-auto-orient", "-profile", icc, "-strip", "-colorspace", "sRGB"));
+        if (outputFormat.supportsQuality) {
+            cmd.addAll(List.of("-quality", "85"));
+        }
+        if (outputFormat.supportsAlpha) {
+            // "-background none" so the mirror-extend fills with transparent, not opaque -
+            // without it the canvas silently loses its alpha channel even with truecolormatte set.
+            cmd.addAll(List.of("-type", "truecolormatte", "-background", "none"));
+        } else {
+            cmd.addAll(List.of("-alpha", "remove", "-type", "truecolor", "-background", "white"));
+        }
+        cmd.addAll(List.of(
             "-resize", orig[0] + "x" + orig[1] + "^",
             "-gravity", "center", "-virtual-pixel", "Mirror",
             "-set", "option:distort:viewport", viewport,
             "-distort", "SRT", "0",
-            "jpg:" + out);
+            outputFormat.ext + ":" + out));
+        return cmd;
+    }
+
+    /** vips-ffm side of imBleed()'s format toggle - same three formats saveToTarget() in VipsStreamingVariant supports. */
+    private static void saveBleed(VImage image, String path, ImageFormat format) throws Exception {
+        switch (format) {
+            case JPG -> image.jpegsave(path, VipsOption.Int("Q", 85), VipsOption.Boolean("strip", true));
+            // filter=248 is libpng's PNG_ALL_FILTERS - see mobileFullPng's case above for why
+            // pngsave's own default (filter=none) is not an acceptable comparison point.
+            case PNG -> image.pngsave(path, VipsOption.Boolean("strip", true), VipsOption.Int("filter", 248));
+            case WEBP -> image.webpsave(path, VipsOption.Int("Q", 85), VipsOption.Boolean("strip", true));
+        }
     }
 
     private static LocalCase vipsCliCase(String name, String src, Path out, int[] target, String icc, RssSampler rss) {
