@@ -18,8 +18,11 @@ actually decision-relevant:
 
   <stem>_time.png            per-operation wall time, baseline engine vs libvips
   combined_time.png          all operations in one figure (only if >1 input file)
-  rss.png                    peak RSS per operation (skipped when not measured,
-                             e.g. any run on macOS - RssSampler needs /proc)
+  rss.png                    peak memory per operation (skipped when not measured,
+                             e.g. any run on macOS - RssSampler needs /proc). NOT a
+                             like-for-like comparison - a forked child's whole RSS vs
+                             libvips' tracked buffers, which are a lower bound covering
+                             ~34% of real process growth. See attributable_memory_mb().
   vips_startup_overhead.png  libvips in-process vs the same op through the CLI
                              (only when a run included the `vipscli` engine)
 
@@ -204,7 +207,20 @@ def attributable_memory_mb(row):
     In-process libvips: peak of libvips' own vips_tracked_get_mem(). NOT rss_self, which
     is unusable here - glibc does not return freed memory to the OS, so the first case
     grows the JVM's RSS and every later case baselines at that elevated level, reuses the
-    same free lists and reads ~0. That is a measurement artifact, not low memory use."""
+    same free lists and reads ~0. That is a measurement artifact, not low memory use.
+
+    THE TWO ARE NOT ON THE SAME SCALE, and the libvips value is a LOWER BOUND. A forked
+    child's RSS is everything resident - image buffers, codec scratch, library code and
+    data, glibc, stack. vips_tracked_get_mem() counts only what libvips routed through
+    vips_tracked_malloc, i.e. image buffers; libjpeg/libpng/libwebp scratch and glib do not
+    appear. Measured against the kernel's exact VmHWM on the mobileFull case, it accounted
+    for ~34% of the process memory the operation actually caused.
+
+    So the visible bar ratio overstates libvips' memory advantage by roughly 3x. libvips
+    does genuinely use less - it never forks, so it never pays per-image process setup or
+    re-maps its own libraries - but the honest margin is the corrected one. Each run prints
+    its own figure in the "memory-metric coverage" block; that is the authoritative number,
+    which is why none is hardcoded here."""
     kb = row["rss_children_kb"] if row["engine"] in SUBPROCESS_ENGINES else row["vips_tracked_peak_kb"]
     return kb / 1024.0 if kb is not None and kb >= 0 else None
 
@@ -238,13 +254,13 @@ def apply_scale(ax, values, base_ylabel):
     ax.set_ylabel(base_ylabel, fontsize=11, fontweight="bold")
 
 
-def annotate_bars(ax, rects, unit="s", font_size=8.5):
+def annotate_bars(ax, rects, unit="s", font_size=8.5, prefix=""):
     for rect in rects:
         h = rect.get_height()
         if h <= 0:
             continue
         text = f"{h:.3f}{unit}" if unit == "s" else f"{h:.1f}{unit}"
-        ax.annotate(text, xy=(rect.get_x() + rect.get_width() / 2, h),
+        ax.annotate(prefix + text, xy=(rect.get_x() + rect.get_width() / 2, h),
                     xytext=(0, 4), textcoords="offset points",
                     ha="center", va="bottom", fontsize=font_size, fontweight="bold")
 
@@ -347,7 +363,8 @@ def rss_chart(grouped, source, out_path):
     r2 = ax.bar(x + width / 2, vips_vals, width, color=COLOR_VIPS,
                 capsize=4, edgecolor="black", linewidth=0.5)
 
-    ax.set_title(f"Peak memory per operation (different metric per engine)\nSource: {source}", fontsize=13, fontweight="bold", pad=14)
+    ax.set_title("Peak memory per operation — NOT a like-for-like comparison\n"
+                 f"Source: {source}", fontsize=13, fontweight="bold", pad=14)
     ax.set_xticks(x)
     # Deliberately NO "Nx less" here, unlike the time chart. These two bars are different
     # quantities - a whole child process' RSS versus libvips' tracked image buffers - so their
@@ -355,14 +372,25 @@ def rss_chart(grouped, source, out_path):
     ax.set_xticklabels([short_label(op) for op in ops], fontsize=9)
     apply_scale(ax, base_vals + vips_vals, "Peak memory attributable to the engine (MB)")
     annotate_bars(ax, r1, unit="MB")
-    annotate_bars(ax, r2, unit="MB")
+    # The libvips bars carry a "greater than or equal to" prefix because the metric behind them
+    # is a lower bound (see attributable_memory_mb). Without it the bar reads as a measured
+    # total, which is the single most likely way this chart gets misquoted.
+    annotate_bars(ax, r2, unit="MB", prefix="≥")
     # The legend carries the "these are two different quantities" caveat, so it travels
     # with the chart without needing a corner note.
     ax.legend(handles=[mpatches.Patch(facecolor=c, label=l, edgecolor="black", linewidth=0.5)
-                       for c, l in [(COLOR_GM, "GM/IM: peak RSS of the forked child process"),
-                                    (COLOR_VIPS, "libvips: peak vips_tracked_get_mem() in-process")]],
+                       for c, l in [(COLOR_GM, "GM/IM: peak RSS of the forked child — EVERYTHING resident"),
+                                    (COLOR_VIPS, "libvips in-process: tracked image BUFFERS only (lower bound)")]],
               fontsize=9, frameon=True, facecolor="white", edgecolor="none")
-    fig.tight_layout()
+    # A caveat in the legend is read; a caveat only in a docstring is not. This chart's whole
+    # failure mode is someone eyeballing the bar heights as a ratio, so the correction sits
+    # under the axes where it cannot be cropped away from the bars.
+    fig.text(0.5, 0.012,
+             "libvips' counter excludes codec scratch (libjpeg/libpng/libwebp), glib and JVM overhead — measured at ~34% of real\n"
+             "process growth. The visible ratio therefore overstates libvips' memory advantage by roughly 3x. libvips does still use\n"
+             "less (it never forks); see the run's \"memory-metric coverage\" block for that run's measured figure.",
+             ha="center", va="bottom", fontsize=8, color="#444444")
+    fig.tight_layout(rect=(0, 0.075, 1, 1))
     fig.savefig(out_path, dpi=200)
     plt.close(fig)
     return out_path

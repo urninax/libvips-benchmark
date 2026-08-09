@@ -35,6 +35,117 @@ final class LocalMeasure {
     @SuppressWarnings("unused")
     static volatile Object blackhole;
 
+    /**
+     * Snapshot of the two EXACT, sampling-immune memory counters, taken before the first case so
+     * the coverage gate can report growth rather than absolute values.
+     */
+    record MemorySnapshot(long vipsHighwaterBytes, long vmHwmKb) {
+        static MemorySnapshot take(RssSampler rss) {
+            return new MemorySnapshot(VipsTrackedMemory.highwaterBytes(), rss.vmHwmKb());
+        }
+    }
+
+    /**
+     * Reports what fraction of real process memory the vipsBuf column actually accounts for, and
+     * audits the sampler that produces it.
+     *
+     * WHY THIS IS PRINTED RATHER THAN LEFT AS A DOC CAVEAT: vipsBuf and rssChildren sit in adjacent
+     * columns and look like peers. They are not. vipsBuf counts only allocations routed through
+     * vips_tracked_malloc - image buffers - while rssChildren counts a forked child's ENTIRE
+     * resident set: buffers, codec scratch, library code and data, glibc, stack. Measured on the
+     * mobileFull case, libvips-tracked memory was 10.4 MB against 31.0 MB of actual process growth,
+     * i.e. the column sees about a third of what it is being compared against. Reading the two
+     * columns as a ratio therefore overstates vips' memory advantage by roughly 3x.
+     *
+     * That vips wins on memory is not in question and this gate does not dispute it - it never
+     * forks, so it never pays per-image process setup or re-maps its own libraries, and that is a
+     * permanent architectural advantage rather than a measurement artifact. The gate exists so the
+     * MARGIN quoted from this table is the real one.
+     *
+     * The sampler audit is the second half: vips_tracked_get_mem_highwater() is exact, so if the
+     * sampled maximum falls well short of the high-water delta over the same window, the 5ms
+     * interval missed peaks and vipsBuf is understated on top of everything else. (Verified once
+     * by hand at 20 reps: sampled max matched the exact high-water to the byte, because peaking
+     * across repeated identical reps recovers what any single rep might miss.)
+     */
+    static void printMemoryCoverage(MemorySnapshot before, RssSampler rss,
+                                    List<HyperfineExport.CaseResult> results) {
+        long sampledMaxKb = results.stream()
+            .filter(r -> "vips".equals(r.engine()))
+            .mapToLong(HyperfineExport.CaseResult::vipsTrackedPeakKb)
+            .filter(kb -> kb >= 0)
+            .max().orElse(-1);
+
+        long hwAfter = VipsTrackedMemory.highwaterBytes();
+        long vmHwmAfterKb = rss.vmHwmKb();
+        long hwDeltaBytes = (hwAfter >= 0 && before.vipsHighwaterBytes() >= 0)
+            ? hwAfter - before.vipsHighwaterBytes() : -1;
+        long vmGrowthKb = (vmHwmAfterKb >= 0 && before.vmHwmKb() >= 0)
+            ? vmHwmAfterKb - before.vmHwmKb() : -1;
+
+        System.out.print(renderCoverage(sampledMaxKb, hwDeltaBytes, vmGrowthKb));
+    }
+
+    /**
+     * Pure rendering of the coverage block, split out from the /proc and libvips reads so the
+     * arithmetic and every branch can be exercised without a Linux container or a live libvips.
+     * All three inputs use -1 for "unavailable".
+     */
+    static String renderCoverage(long sampledMaxKb, long hwDeltaBytes, long vmGrowthKb) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format(Locale.ROOT, "%n---- memory-metric coverage ----%n"));
+
+        if (sampledMaxKb < 0) {
+            sb.append("no in-process vips cases with a usable vipsBuf reading — nothing to audit\n");
+            return sb.toString();
+        }
+        double sampledMb = sampledMaxKb / 1024.0;
+        sb.append(String.format(Locale.ROOT, "  vipsBuf, max sampled across vips cases   : %8.1f MB%n", sampledMb));
+
+        if (hwDeltaBytes < 0) {
+            sb.append("  vips_tracked highwater delta (EXACT)     :      n/a  (symbol did not resolve)\n");
+        } else {
+            double hwDeltaMb = hwDeltaBytes / (1024.0 * 1024.0);
+            sb.append(String.format(Locale.ROOT, "  vips_tracked highwater delta (EXACT)     : %8.1f MB", hwDeltaMb));
+            if (hwDeltaMb > 0.01) {
+                double captured = 100.0 * sampledMb / hwDeltaMb;
+                sb.append(String.format(Locale.ROOT, "   [sampler captured %.1f%%]%n", captured));
+                if (captured < 90.0) {
+                    sb.append("  WARNING: the sampler missed a material share of the true libvips peak — the\n");
+                    sb.append("    5ms interval is too coarse for these case durations, so vipsBuf is understated.\n");
+                }
+            } else {
+                sb.append(String.format(Locale.ROOT, "%n"));
+            }
+        }
+
+        if (vmGrowthKb < 0) {
+            sb.append("  JVM VmHWM growth over the run            :      n/a  (needs /proc — Linux only)\n");
+            sb.append("  => coverage ratio unavailable on this platform; run in the container for it.\n");
+            return sb.toString();
+        }
+
+        double vmGrowthMb = vmGrowthKb / 1024.0;
+        sb.append(String.format(Locale.ROOT, "  JVM VmHWM growth over the run            : %8.1f MB  (kernel-exact)%n", vmGrowthMb));
+        if (vmGrowthMb <= 0.01) {
+            sb.append("  => VmHWM did not grow during this run, so no coverage ratio can be formed. That\n");
+            sb.append("     usually means the JVM's high-water was already set before the first case.\n");
+            return sb.toString();
+        }
+
+        double coverage = 100.0 * sampledMb / vmGrowthMb;
+        sb.append(String.format(Locale.ROOT,
+            "  => vipsBuf accounts for %.1f%% of the process memory these cases actually caused.%n", coverage));
+        sb.append("     The remainder is codec scratch (libjpeg/libpng/libwebp), glib and JVM overhead —\n");
+        sb.append("     none of it routes through vips_tracked_malloc, so none of it reaches that column.\n");
+        sb.append("     GM's rssChildren counts ALL of its equivalent. Do NOT read vipsBuf/rssChildren as a\n");
+        sb.append(String.format(Locale.ROOT,
+            "     like-for-like ratio: doing so overstates vips' memory advantage by roughly %.1fx.%n",
+            coverage > 0 ? 100.0 / coverage : 0.0));
+        sb.append("     (vips does still win on memory — it never forks — but by the corrected margin.)\n");
+        return sb.toString();
+    }
+
     static List<HyperfineExport.CaseResult> measureAll(List<LocalCase> cases, int warmup, int measured,
                                                        RssSampler rss, VipsTrackedMemory vipsMem,
                                                        boolean procAvailable) throws Exception {

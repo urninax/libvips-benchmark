@@ -41,7 +41,23 @@ import java.util.concurrent.locks.LockSupport;
  */
 public final class VipsTrackedMemory implements Runnable {
 
-    private static final MethodHandle GET_MEM = resolveGetMem();
+    private static final MethodHandle GET_MEM = resolve("vips_tracked_get_mem");
+
+    /**
+     * {@code vips_tracked_get_mem_highwater()} - libvips' EXACT peak-ever tracked allocation.
+     * Confirmed present in the shipped library ({@code nm -gU libvips.42.dylib | grep tracked}).
+     *
+     * Deliberately NOT used as the per-case metric, even though it is exact and the sampled
+     * counter is only an estimate: it is monotonic for the life of the process and libvips exposes
+     * no way to reset it, so after the first case every later case's "peak" would be whatever the
+     * largest case so far happened to be. Sampling the live counter is the only way to get a
+     * genuinely per-case figure.
+     *
+     * It IS the right tool for auditing that sampler, which is what LocalMeasure's coverage gate
+     * does: if the sampled maximum is well below the exact high-water delta over the same window,
+     * the sampling interval is too coarse and the vipsBuf column is understated.
+     */
+    private static final MethodHandle GET_MEM_HIGHWATER = resolve("vips_tracked_get_mem_highwater");
 
     private final long intervalNanos;
     private volatile boolean running = true;
@@ -57,9 +73,18 @@ public final class VipsTrackedMemory implements Runnable {
     }
 
     public static long currentBytes() {
-        if (GET_MEM == null) return -1;
+        return call(GET_MEM);
+    }
+
+    /** Exact peak-ever tracked allocation for this process, or -1 if the symbol did not resolve. Monotonic - see GET_MEM_HIGHWATER. */
+    public static long highwaterBytes() {
+        return call(GET_MEM_HIGHWATER);
+    }
+
+    private static long call(MethodHandle h) {
+        if (h == null) return -1;
         try {
-            return (long) GET_MEM.invokeExact();
+            return (long) h.invokeExact();
         } catch (Throwable t) {
             return -1;
         }
@@ -86,11 +111,11 @@ public final class VipsTrackedMemory implements Runnable {
         return GET_MEM == null ? -1 : peakBytes / 1024;
     }
 
-    private static MethodHandle resolveGetMem() {
+    private static MethodHandle resolve(String symbol) {
         try {
             // Arena.global(): the handle lives as long as the JVM, matching libvips itself.
             SymbolLookup lookup = VipsLibLookup.buildSymbolLoader(Arena.global());
-            return lookup.find("vips_tracked_get_mem")
+            return lookup.find(symbol)
                 .map(addr -> Linker.nativeLinker().downcallHandle(
                     addr, FunctionDescriptor.of(ValueLayout.JAVA_LONG))) // size_t
                 .orElse(null);

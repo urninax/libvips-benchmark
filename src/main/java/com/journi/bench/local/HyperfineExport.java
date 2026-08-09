@@ -104,7 +104,11 @@ final class HyperfineExport {
 
         // extended table
         sb.append("\n#### ").append(title).append(" — extended\n\n");
-        sb.append("| Command | Engine | Median [ms] | MAD [ms] | n | vipsPeak [MB] | rssChildren [MB] | rssSelf [MB] | out [KB] |\n");
+        // "vipsBuf", NOT "vipsPeak": the old label read as a peer of rssChildren and invited
+        // exactly the ratio it must not be used for. It is not a peak of anything comparable -
+        // it is libvips' image BUFFERS only, measured at ~34% of real process growth (see
+        // LocalMeasure.printMemoryCoverage, which now prints that ratio per run).
+        sb.append("| Command | Engine | Median [ms] | MAD [ms] | n | vipsBuf [MB] | rssChildren [MB] | rssSelf [MB] | out [KB] |\n");
         sb.append("|:---|:---|---:|---:|---:|---:|---:|---:|---:|\n");
         for (CaseResult r : results) {
             List<Double> sorted = new ArrayList<>(r.seconds());
@@ -118,11 +122,17 @@ final class HyperfineExport {
         }
         sb.append("\nMedian/MAD are the robust summary — the distribution is a hard lower bound with a\n");
         sb.append("one-sided tail of interference, so mean±sd overstates spread.\n\n");
-        sb.append("MEMORY COLUMNS ARE DIFFERENT QUANTITIES — never add or directly compare them:\n");
-        sb.append("- `vipsPeak`: peak of libvips' own vips_tracked_get_mem() during the case. The\n");
-        sb.append("  meaningful number for in-process vips rows. Undercounts codec-internal scratch.\n");
-        sb.append("- `rssChildren`: peak RSS of the forked gm/convert child. The meaningful number\n");
-        sb.append("  for GM/IM rows, and a genuine per-image figure since every rep forks fresh.\n");
+        sb.append("MEMORY COLUMNS ARE DIFFERENT QUANTITIES — never add them, and never divide one by\n");
+        sb.append("the other. `vipsBuf / rssChildren` is NOT a memory-saving ratio; measured on the\n");
+        sb.append("mobileFull case it overstates vips' advantage by ~3x. The run's own\n");
+        sb.append("\"memory-metric coverage\" block prints the real figure for that run.\n");
+        sb.append("- `vipsBuf`: peak of libvips' own vips_tracked_get_mem() during the case — image\n");
+        sb.append("  BUFFERS ONLY. Excludes libjpeg/libpng/libwebp scratch, glib, and JVM overhead,\n");
+        sb.append("  which together were ~2/3 of the actual process memory the case caused.\n");
+        sb.append("- `rssChildren`: peak RSS of the forked gm/convert child — the child's ENTIRE\n");
+        sb.append("  resident set. The meaningful number for GM/IM rows, and a genuine per-image\n");
+        sb.append("  figure since every rep forks fresh. vips legitimately avoids this cost entirely\n");
+        sb.append("  by never forking; that advantage is real, only its magnitude is misread here.\n");
         sb.append("- `rssSelf`: JVM RSS growth over a pre-case baseline. UNRELIABLE for any case\n");
         sb.append("  after the first — glibc does not return freed memory to the OS, so later cases\n");
         sb.append("  reuse existing free lists and read ~0. Kept only as a diagnostic.\n");

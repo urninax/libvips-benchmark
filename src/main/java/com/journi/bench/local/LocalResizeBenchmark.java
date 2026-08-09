@@ -315,6 +315,11 @@ public final class LocalResizeBenchmark {
         var sourceInfo = new HyperfineExport.SourceInfo(
             src, srcExt, srcW, srcH, Files.size(Path.of(src)), iccBytes);
 
+        // Taken before the first case so the coverage gate reports GROWTH: both counters behind it
+        // are monotonic for the life of the process, so an absolute reading would be dominated by
+        // JVM startup rather than by anything these cases did.
+        LocalMeasure.MemorySnapshot memBefore = LocalMeasure.MemorySnapshot.take(rss);
+
         List<HyperfineExport.CaseResult> standardResults = LocalMeasure.measureAll(standard, warmup, measured, rss, vipsMem, procAvailable);
         HyperfineExport.write(formatDir.resolve("standard_resize_ffm.md"),
             formatDir.resolve("standard_resize_ffm.json"), sourceInfo, "Standard resize", standardResults);
@@ -330,11 +335,17 @@ public final class LocalResizeBenchmark {
         System.out.println();
         System.out.println("== Bleed resize results written to " + formatDir.resolve("bleed_resize_ffm.md") + " ==");
 
+        List<HyperfineExport.CaseResult> all = new ArrayList<>(standardResults);
+        all.addAll(bleedResults);
+
+        // Before stop(): vmHwmKb() reads /proc directly rather than through the sampler thread, so
+        // ordering is not strictly required - but keeping the samplers alive until every reading is
+        // taken removes the question entirely.
+        LocalMeasure.printMemoryCoverage(memBefore, rss, all);
+
         rss.stop();
         vipsMem.stop();
 
-        List<HyperfineExport.CaseResult> all = new ArrayList<>(standardResults);
-        all.addAll(bleedResults);
         printValidityGates(all);
 
         System.out.println();

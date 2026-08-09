@@ -220,12 +220,16 @@ public final class LocalMetadataBenchmark {
         var sourceInfo = new HyperfineExport.SourceInfo(
             src, srcExt, srcW, srcH, srcBytes.length, iccBytes);
 
+        LocalMeasure.MemorySnapshot memBefore = LocalMeasure.MemorySnapshot.take(rss);
+
         List<HyperfineExport.CaseResult> results =
             LocalMeasure.measureAll(cases, warmup, measured, rss, vipsMem, procAvailable);
         HyperfineExport.write(formatDir.resolve("metadata_extract_ffm.md"),
             formatDir.resolve("metadata_extract_ffm.json"), sourceInfo, "Metadata extraction", results);
         System.out.println();
         System.out.println("== Metadata results written to " + formatDir.resolve("metadata_extract_ffm.md") + " ==");
+
+        LocalMeasure.printMemoryCoverage(memBefore, rss, results);
 
         rss.stop();
         vipsMem.stop();
