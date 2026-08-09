@@ -170,15 +170,6 @@ public final class VipsStreamingVariant implements Variant {
             outW = (int) processed.getWidth();
             outH = (int) processed.getHeight();
 
-            if (streamFetch) {
-                // Close the span at the last read the loader actually performed. Deliberately not
-                // procEnd: libvips may stop reading well before it finishes computing, and
-                // charging the remaining compute time to "fetch" would manufacture overlap that
-                // isn't there.
-                fetchNanos = Math.max(0, lastReadEndNanos.get() - fetchSpanStart);
-                bytesIn = bytesReadAcc.get();
-            }
-
             if (streamPut) {
                 long us = System.nanoTime();
                 try (StreamingPartUploadOutputStream upload =
@@ -198,6 +189,21 @@ public final class VipsStreamingVariant implements Variant {
                     PutObjectRequest.builder().bucket(bucket).key(destKey).contentLength((long) outBytes.length).build(),
                     RequestBody.fromBytes(outBytes));
                 uploadNanos = System.nanoTime() - us;
+            }
+
+            if (streamFetch) {
+                // Captured HERE, after the save block, not right after procEnd - because the loader
+                // fix above (loadStreamedSource) makes the read callbacks genuinely lazy for
+                // JPEG/PNG, most of the actual byte transfer now happens DURING saveToTarget's
+                // evaluation of the pipeline, not before it. Reading lastReadEndNanos any earlier
+                // would freeze the span before the reads it's supposed to measure have even
+                // happened - exactly the bug that made this metric read ~1.00 on standard resize
+                // even once the underlying fetch/decode genuinely started overlapping. "Deliberately
+                // not procEnd" from the comment this replaced is still the right idea; procEnd was
+                // simply the wrong proxy for "after the loader is done reading" once loading itself
+                // stopped happening inside procStart..procEnd.
+                fetchNanos = Math.max(0, lastReadEndNanos.get() - fetchSpanStart);
+                bytesIn = bytesReadAcc.get();
             }
 
             long total = System.nanoTime() - t0;
@@ -230,6 +236,44 @@ public final class VipsStreamingVariant implements Variant {
             return image.flatten(VipsOption.ArrayDouble("background", List.of(255.0, 255.0, 255.0)));
         }
         return image;
+    }
+
+    /**
+     * Loads the streamed VSource via the FORMAT-EXPLICIT loader (jpegloadSource/pngloadSource/
+     * webploadSource), never the bare newFromSource(arena, vsrc, options...) overload.
+     * <p>
+     * That bare overload has no loader-name argument, so it triggers libvips' format
+     * AUTODETECTION - and on a non-seekable custom source (this one registers no SeekCallback),
+     * autodetection blocks until it has read the ENTIRE object before returning, regardless of
+     * "access=sequential". Verified directly: instrumented a read callback with an artificial
+     * per-chunk delay (removes a race that made a zero-latency version of this same test look
+     * misleadingly lazy) and measured bytes consumed by the time each call returns:
+     * <pre>
+     *   explicit jpegload_source, sequential  ->      4,096 /  3,456,566 bytes ( 0.1%) - genuinely lazy
+     *   bare new_from_source(""), sequential  ->  3,456,566 /  3,456,566 bytes (100.0%) - whole file
+     * </pre>
+     * So the streamed-fetch path was never actually interleaving network I/O with decode the way
+     * its own naming (and the overlapRatio metric it was supposed to demonstrate) implied - the
+     * autodetect call pulled the whole object up front, same as the buffered path does explicitly.
+     * This is why overlapRatio read ~1.00 on standard resize even while cpu% and throughput both
+     * improved: whatever b2/b3's real advantage was, it was never fetch/compute overlap.
+     * <p>
+     * Explicit per-format loaders skip autodetection and stay lazy for JPEG and PNG (same 4KB
+     * header-only read as above). WEBP DOES NOT: webpload_source pulls 100% of the file
+     * immediately even called explicitly - a libwebp/vips-webpload limitation, not the
+     * autodetection bug, so streamed WebP sources get no benefit from this change. Confirmed via
+     * the same instrumented-callback method, not by inspecting libwebp/vips source.
+     */
+    private VImage loadStreamedSource(Arena arena, VSource vsrc) throws VipsError {
+        VipsOption[] opts = {
+            VipsOption.Enum("access", VipsAccess.ACCESS_SEQUENTIAL),
+            VipsOption.Enum("fail-on", VipsFailOn.FAIL_ON_ERROR),
+        };
+        return switch (inputFormat) {
+            case JPG -> VImage.jpegloadSource(arena, vsrc, opts);
+            case PNG -> VImage.pngloadSource(arena, vsrc, opts);
+            case WEBP -> VImage.webploadSource(arena, vsrc, opts);
+        };
     }
 
     private void saveToTarget(VImage image, VTarget target) throws VipsError {
@@ -291,9 +335,7 @@ public final class VipsStreamingVariant implements Variant {
         // separate range-GET purely to sniff dimensions (out of scope here) -
         // left as the same non-shrink-on-load thumbnailImage() path as before,
         // called out explicitly rather than silently left half-fixed.
-        VImage source = VImage.newFromSource(arena, vsrc,
-            VipsOption.Enum("access", VipsAccess.ACCESS_SEQUENTIAL),
-            VipsOption.Enum("fail-on", VipsFailOn.FAIL_ON_ERROR));
+        VImage source = loadStreamedSource(arena, vsrc);
         int[] target = GmStandardVariant.areaFit((int) source.getWidth(), (int) source.getHeight(), TARGET_PIXELS);
         // ICC AFTER the resize, not before - see iccAfterResize()'s doc. This branch used to
         // colour-transform at full source resolution, which is 4x the pixels of the 2.25MP output
@@ -342,6 +384,19 @@ public final class VipsStreamingVariant implements Variant {
      * until the source's actual width/height are read, which reproduces standardResize()'s own
      * peek-vs-stream fork below - streamed fetch loses shrink-on-load here too, for the same
      * reason it does there.
+     * <p>
+     * A SECOND, SEPARATE reason streamed fetch gets no genuine overlap here even after
+     * loadStreamedSource() fixed the autodetection bug: thumbnailImage() itself is eager - not
+     * lazy - whenever it isn't actually shrinking anything. Isolated directly: `thumbnail_image`
+     * from a 2268x4032 source TO 2268x4032 (no shrink) pulled 94% of the file before returning,
+     * with no embed() or save involved at all; the identical call with a real downscale target
+     * pulled only the 4KB header. On these fixtures content clamps to the full source size (see
+     * this method's own doc above), i.e. NO shrink ever happens for bleed - so this eager path is
+     * not a corner case here, it is the path every bleed job takes. Neither loadStreamedSource()
+     * nor moving process()'s fetchNanos capture (see its own comment) can fix this: the reads
+     * finish before either measurement point is reached either way. Unresolved - would need
+     * libvips itself to stay lazy on a 1:1 "resize", or a different operation entirely for the
+     * no-shrink case.
      */
     private VImage bleedResize(Arena arena, VSource vsrc, byte[] bufferedInput) throws VipsError {
         if (bufferedInput != null) {
@@ -365,9 +420,7 @@ public final class VipsStreamingVariant implements Variant {
         // header to compute the area-fit content target and later reading pixels would both have
         // to pull from the same vsrc/loader node. Same non-shrink-on-load thumbnailImage()
         // fallback as standardResize()'s streamed branch, for the same reason.
-        VImage source = VImage.newFromSource(arena, vsrc,
-            VipsOption.Enum("access", VipsAccess.ACCESS_SEQUENTIAL),
-            VipsOption.Enum("fail-on", VipsFailOn.FAIL_ON_ERROR));
+        VImage source = loadStreamedSource(arena, vsrc);
         int[] content = GmStandardVariant.areaFit((int) source.getWidth(), (int) source.getHeight(), BLEED_CONTENT_TARGET_PIXELS);
         int fullW = content[0] + 2 * BLEED_PX, fullH = content[1] + 2 * BLEED_PX;
         // ICC after the resize and before the embed - matching the buffered branch above, which
