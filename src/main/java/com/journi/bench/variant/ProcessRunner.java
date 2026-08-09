@@ -53,7 +53,53 @@ public final class ProcessRunner {
         }
     }
 
-    static Path tempFile(Path dir, String prefix, String suffix) throws IOException {
+    /**
+     * Like {@link #run}, but CAPTURES stdout and returns it.
+     *
+     * Exists for `gm identify`, where the output IS the product - production parses that delimited
+     * line into an ImageInfo. run()'s Redirect.DISCARD would be measuring a cheaper operation than
+     * production performs: discarding to /dev/null skips the pipe setup and the read entirely, so a
+     * metadata benchmark built on run() would silently flatter GM by leaving out the one part of
+     * the work the caller actually wants.
+     *
+     * stdout is drained to EOF BEFORE waitFor(): a process that outfills the ~64KB pipe buffer
+     * blocks forever writing while we block forever waiting. `gm identify -format` emits one short
+     * line so it cannot happen here, but the ordering is free and the deadlock is not.
+     */
+    public static String runCapturing(List<String> argv, RssSampler rssSampler, long timeoutSeconds)
+            throws IOException, InterruptedException {
+        ProcessBuilder pb = new ProcessBuilder(argv);
+        pb.environment().put("OMP_NUM_THREADS", "1");
+        pb.environment().put("MAGICK_THREAD_LIMIT", "1");
+        // stderr discarded, NOT merged into stdout - GM writes warnings there for perfectly
+        // readable files (e.g. unknown EXIF tags), and merging would corrupt the delimited line
+        // this returns.
+        pb.redirectError(ProcessBuilder.Redirect.DISCARD);
+
+        Process p = pb.start();
+        long pid = p.pid();
+        if (rssSampler != null) rssSampler.registerChild(pid);
+        try {
+            String out;
+            try (java.io.InputStream in = p.getInputStream()) {
+                out = new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            }
+            boolean finished = p.waitFor(timeoutSeconds, TimeUnit.SECONDS);
+            if (!finished) {
+                p.destroyForcibly();
+                throw new IOException("Process timed out after " + timeoutSeconds + "s: " + argv);
+            }
+            int exit = p.exitValue();
+            if (exit != 0) {
+                throw new IOException("Process exited " + exit + ": " + String.join(" ", argv));
+            }
+            return out;
+        } finally {
+            if (rssSampler != null) rssSampler.unregisterChild(pid);
+        }
+    }
+
+    public static Path tempFile(Path dir, String prefix, String suffix) throws IOException {
         return java.nio.file.Files.createTempFile(dir, prefix, suffix);
     }
 }

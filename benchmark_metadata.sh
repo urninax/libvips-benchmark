@@ -22,10 +22,13 @@ set -euo pipefail
 # (both ~0.07s here - see the startup caveat below, which is why).
 #
 # ############################################################################
-# # READ THIS BEFORE INTERPRETING THE NUMBERS
+# # DO NOT USE THIS SCRIPT TO COMPARE GM AGAINST LIBVIPS. IT INVERTS THE ANSWER.
 # #
-# # This benchmark is dominated by PROCESS STARTUP, not by metadata work.
-# # Measured on this repo's own fixtures:
+# # Use instead:
+# #     VIPS_CONCURRENCY=1 java -jar bench.jar local-metadata <photo> /results
+# # (com.journi.bench.local.LocalMetadataBenchmark - read its class doc.)
+# #
+# # This script is dominated by PROCESS STARTUP, not by metadata work:
 # #
 # #     vipsheader -a   507-byte file : 0.07s     12MB PNG : 0.07s
 # #     gm identify     507-byte file : ~0.00s    12MB PNG : ~0.00s
@@ -35,17 +38,24 @@ set -euo pipefail
 # # plugin modules, and ~0% the cost of actually parsing the header. GM's
 # # binary starts far faster and its header parse is also near-free.
 # #
-# # So: this script honestly measures "cost of shelling out to each CLI to
-# # read metadata" - which IS the real cost if production shells out per
-# # image, as the current GM integration does. It does NOT measure "is
-# # libvips slower at parsing metadata" - that question is invisible here
-# # because neither tool spends meaningful time on it.
+# # Production will NEVER invoke vipsheader. It will call libvips in-process
+# # from a long-lived JVM and pay that init exactly once at boot. GM genuinely
+# # does fork per image and will keep doing so. Measured in those two real
+# # shapes on samples/sample_original.jpg (macOS, JDK 26, warm):
 # #
-# # If the target architecture calls libvips IN-PROCESS (vips-ffm in a
-# # long-lived JVM, as the S3 benchmark in this repo does), the ~70ms startup
-# # is paid ONCE at boot, not per image, and these numbers do not transfer at
-# # all. Do not quote this benchmark as a reason not to migrate without also
-# # measuring the in-process path.
+# #     vipsheader -a  (what THIS script times)          99.5 ms
+# #     gm identify x2 (what production does today)      17.2 ms
+# #     gm identify x2 + temp-file spill (S3 shape)      20.0 ms
+# #     vips-ffm in-process, from file                    2.0 ms
+# #     vips-ffm in-process, from memory (S3 shape)       1.2 ms
+# #
+# # So this script says GM wins by ~6x; the production shapes say libvips wins
+# # by ~17x. Same two libraries, opposite conclusion.
+# #
+# # WHAT THIS SCRIPT IS STILL GOOD FOR: the GM rows. Shelling out per image is
+# # exactly what the current GM integration does, so those numbers are real.
+# # The vipsheader row is kept only as the startup-cost reference it actually
+# # is - it is NOT libvips' cost of reading metadata.
 # ############################################################################
 # ============================================================================
 
@@ -135,7 +145,7 @@ hyperfine \
     "gm identify -format '$GM_BASIC_FMT' '$SRC'" \
   -n "GM   identify full+GPS (w;h;format;orientation;make;model;GPS*)" \
     "gm identify -format '$GM_FULL_FMT' '$SRC'" \
-  -n "vips vipsheader -a (all fields; covers both GM calls)" \
+  -n "vips vipsheader -a (STARTUP REFERENCE ONLY — not the production shape)" \
     "vipsheader -a '$SRC'"
 
 prepend_source_name "$FORMAT_DIR/metadata_extract.md"
@@ -147,7 +157,11 @@ echo "Raw JSON is next to it - note the prepended source-filename line makes it"
 echo "non-strict JSON; strip it first:"
 echo "  tail -n +3 $FORMAT_DIR/metadata_extract.json | jq ."
 echo
-echo "REMINDER: these numbers are ~entirely CLI process-startup cost (vipsheader"
-echo "measures the same ~0.07s on a 507-byte file as on a 12MB one). Valid for"
-echo "'what does shelling out per image cost', NOT for 'is libvips slower at"
-echo "reading metadata'. See the header comment in this script before quoting."
+echo "REMINDER: the vipsheader row is ~entirely CLI process-startup cost (the same"
+echo "~0.07s on a 507-byte file as on a 12MB one) and is NOT libvips' cost of reading"
+echo "metadata. Production calls libvips in-process and pays that init once at boot."
+echo
+echo "For the GM-vs-libvips comparison in the shapes production actually uses, run:"
+echo "  VIPS_CONCURRENCY=1 java -jar target/bench.jar local-metadata '$SRC' results"
+echo "It reports ~17ms for GM's two forks vs ~1-2ms in-process — the opposite ranking"
+echo "to the table above. See the header comment in this script before quoting anything."

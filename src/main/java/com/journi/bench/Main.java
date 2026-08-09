@@ -4,6 +4,7 @@ import com.journi.bench.harness.DrainHarness;
 import com.journi.bench.harness.DrainStats;
 import com.journi.bench.harness.DrainStatsCodec;
 import com.journi.bench.harness.ResultTable;
+import com.journi.bench.local.LocalMetadataBenchmark;
 import com.journi.bench.local.LocalResizeBenchmark;
 import com.journi.bench.metrics.RssSampler;
 import com.journi.bench.metrics.VipsTrackedMemory;
@@ -44,7 +45,12 @@ public final class Main {
             // subprocesses. No S3 - BenchConfig.fromEnv() above only reads env, and no S3 client
             // is constructed unless seed/run is dispatched.
             case "local-resize" -> LocalResizeBenchmark.run(cfg, args);
-            default -> throw new IllegalArgumentException("Unknown command: " + cmd + " (expected: run, seed, smoke-test, run-variant, local-resize)");
+            // Metadata extraction in the PRODUCTION shapes: GM forked per image vs libvips
+            // in-process. Replaces benchmark_metadata.sh's CLI-vs-CLI comparison, which measures
+            // vipsheader's process startup and reports the opposite ordering - see the class doc.
+            case "local-metadata" -> LocalMetadataBenchmark.run(cfg, args);
+            default -> throw new IllegalArgumentException("Unknown command: " + cmd
+                + " (expected: run, seed, smoke-test, run-variant, local-resize, local-metadata)");
         }
     }
 

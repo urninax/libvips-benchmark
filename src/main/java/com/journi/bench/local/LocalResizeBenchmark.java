@@ -315,7 +315,7 @@ public final class LocalResizeBenchmark {
         var sourceInfo = new HyperfineExport.SourceInfo(
             src, srcExt, srcW, srcH, Files.size(Path.of(src)), iccBytes);
 
-        List<HyperfineExport.CaseResult> standardResults = measureAll(standard, warmup, measured, rss, vipsMem, procAvailable);
+        List<HyperfineExport.CaseResult> standardResults = LocalMeasure.measureAll(standard, warmup, measured, rss, vipsMem, procAvailable);
         HyperfineExport.write(formatDir.resolve("standard_resize_ffm.md"),
             formatDir.resolve("standard_resize_ffm.json"), sourceInfo, "Standard resize", standardResults);
         System.out.println();
@@ -324,7 +324,7 @@ public final class LocalResizeBenchmark {
         System.out.println();
         System.out.println("Bleed case — content " + dim(orig) + ", bleed " + BLEED_PX
             + "px/edge, full canvas " + bleedLabel);
-        List<HyperfineExport.CaseResult> bleedResults = measureAll(bleed, warmup, measured, rss, vipsMem, procAvailable);
+        List<HyperfineExport.CaseResult> bleedResults = LocalMeasure.measureAll(bleed, warmup, measured, rss, vipsMem, procAvailable);
         HyperfineExport.write(formatDir.resolve("bleed_resize_ffm.md"),
             formatDir.resolve("bleed_resize_ffm.json"), sourceInfo, "Bleed resize", bleedResults);
         System.out.println();
@@ -368,68 +368,8 @@ public final class LocalResizeBenchmark {
     }
 
     // ---- measurement -------------------------------------------------------
-
-    private static List<HyperfineExport.CaseResult> measureAll(List<LocalCase> cases, int warmup, int measured,
-                                                               RssSampler rss, VipsTrackedMemory vipsMem,
-                                                               boolean procAvailable) throws Exception {
-        List<HyperfineExport.CaseResult> out = new ArrayList<>();
-        int i = 0;
-        for (LocalCase c : cases) {
-            System.out.printf(Locale.ROOT, "Benchmark %d: %s%n", ++i, c.name());
-            out.add(measure(c, warmup, measured, rss, vipsMem, procAvailable));
-            HyperfineExport.CaseResult r = out.get(out.size() - 1);
-            var s = com.journi.bench.harness.Stats.summarize(r.seconds());
-            System.out.printf(Locale.ROOT, "  Time (mean ± σ):  %8.1f ms ± %5.1f ms    Range: %.1f … %.1f ms  (%d runs)%n%n",
-                s.mean() * 1000, s.stddev() * 1000, s.min() * 1000, s.max() * 1000, s.n());
-        }
-        return out;
-    }
-
-    private static HyperfineExport.CaseResult measure(LocalCase c, int warmup, int measured,
-                                                      RssSampler rss, VipsTrackedMemory vipsMem,
-                                                      boolean procAvailable) throws Exception {
-        List<Double> warmupTimes = new ArrayList<>();
-        for (int i = 0; i < warmup; i++) {
-            long t0 = System.nanoTime();
-            c.action().run();
-            warmupTimes.add((System.nanoTime() - t0) / 1e9);
-        }
-
-        // Baseline AFTER warmup: resetPeaks() only zeroes tracking counters, it cannot make the OS
-        // give back heap this JVM already grew into, so without subtracting a baseline a case that
-        // happens to run later silently reports memory it never needed.
-        System.gc();
-        Thread.sleep(50);
-        long baselineSelfKb = rss.currentSelfKb();
-        rss.resetPeaks();
-        vipsMem.resetPeak();
-
-        List<Double> times = new ArrayList<>();
-        for (int i = 0; i < measured; i++) {
-            // Everything that matters is inside this region and nothing else is. libvips is lazily
-            // evaluated: thumbnail/embed only build an operation graph (~0ms) and ALL decode/resize/
-            // encode work happens when the save call pulls the pipeline. Timing the stages
-            // separately is forbidden - it either reports a meaningless "thumbnail = 0.02ms", or,
-            // if evaluation is forced between stages, defeats pipeline fusion and measures a
-            // slower pipeline that only exists because it was instrumented.
-            long t0 = System.nanoTime();
-            c.action().run();
-            times.add((System.nanoTime() - t0) / 1e9);
-        }
-
-        long selfKb = -1, childrenKb = -1;
-        if (procAvailable) {
-            selfKb = Math.max(0, rss.peakSelfKb() - baselineSelfKb);
-            childrenKb = rss.peakChildrenKb();
-        }
-        long outBytes = -1;
-        try {
-            if (Files.isRegularFile(c.output())) outBytes = Files.size(c.output());
-        } catch (IOException ignored) {
-        }
-        return new HyperfineExport.CaseResult(c.name(), c.engine(), times, warmupTimes,
-            selfKb, childrenKb, vipsMem.peakKb(), outBytes);
-    }
+    // Lives in LocalMeasure, shared with LocalMetadataBenchmark - the warmup/baseline/timed-region
+    // methodology is the load-bearing part of these benchmarks and must not exist in two copies.
 
     /**
      * Flags cases where the two engines did not produce equivalent output, so the row cannot be
