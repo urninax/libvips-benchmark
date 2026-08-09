@@ -168,11 +168,23 @@ public final class GmStandardVariant implements Variant {
 
     private List<String> gmCommand(Path in, Path out, int w, int h) {
         // -size before the source path is a libjpeg read-time hint (DCT-domain scaled
-        // decompression) - without it GM fully decodes at source resolution before discarding
-        // most of it on resize, while vips gets the equivalent shrink-on-load for free. Same
-        // fix as b9814e7 in benchmark_resize.sh, ported here (was never applied to this
-        // harness, so the standard-resize row was comparing "does GM get a decode shortcut"
-        // rather than actual resize cost, and the gap grew with source resolution).
+        // decompression). It is here because PRODUCTION passes it: GraphicsMagickClient.resize
+        // computes `useSize = !keepExif && (srcW > outW || srcH > outH)` and buildCmd emits
+        // `gm convert -size <outW>x<outH> ...` whenever that holds - true for every downscale
+        // that isn't keepExif, i.e. for this variant. Dropping it would model a command
+        // production does not run.
+        //
+        // The justification originally given for it - "vips gets the equivalent shrink-on-load
+        // for free" - is FALSE at these ratios, and the correction matters when reading any row
+        // here. 2268x4032 -> 1125x2000 is shrink 2.016; `vips --vips-info` reports "loading with
+        // factor 1 pre-shrink", i.e. libvips decodes the full 9.14MP, because it only pre-shrinks
+        // at shrink >= ~2.83. GM decodes ~2.29MP. The 4x decode asymmetry is production's, not a
+        // benchmark artifact, but it is an asymmetry - not two engines taking the same shortcut.
+        //
+        // It also is not a pure speed flag: the 1/2 IDCT low-passes the image before Lanczos runs
+        // (high-frequency energy 22.320 -> 19.832 on baseline.jpg), which is why GM's WebP output
+        // is ~11% smaller than vips' for the same nominal quality. See LocalResizeBenchmark's
+        // printValidityGates() for the full measurement.
         List<String> cmd = new ArrayList<>(List.of("gm", "convert",
             "-size", w + "x" + h, in.toString(),
             "-auto-orient",

@@ -147,18 +147,35 @@ esac
 # than the fictional 4.2x.
 #
 # `-size <target>` BEFORE the source path on every GM downscale command below
-# is a libjpeg read-time hint (DCT-domain scaled decompression, 1/1-1/8) -
-# WITHOUT it, GM always fully decodes the source at its real resolution before
-# discarding most of it during resize, while `vipsthumbnail` always gets the
-# equivalent shrink-on-load for free. Verified empirically: adding this hint
-# took a 2268x4032 JPEG thumb resize from ~0.16s to ~0.04s (byte-identical
-# output dimensions) on this repo's own baseline.jpg fixture. Without it, this
-# benchmark doesn't answer "is vips' resize faster" so much as "does this
-# script know about a decode shortcut GM has and vips gets automatically" -
-# the gap it produces grows with SOURCE resolution rather than reflecting a
-# real, resolution-independent algorithmic difference. Confirmed harmless for
-# the PNG case (GM has no equivalent scaled-decode path for PNG, so the hint
-# is a no-op there - byte-identical output verified).
+# is a libjpeg read-time hint (DCT-domain scaled decompression, 1/1-1/8).
+#
+# IT IS HERE BECAUSE PRODUCTION PASSES IT, not to level the field. GraphicsMagick
+# Client.resize computes `useSize = !keepExif && (srcW > outW || srcH > outH)` and
+# buildCmd emits `gm convert -size <outW>x<outH> ...` whenever that holds - i.e.
+# for every downscale that isn't keepExif, which is every case below except
+# `original`. Omitting it would benchmark a command production never runs.
+#
+# THE ORIGINAL JUSTIFICATION FOR THIS FLAG WAS WRONG and is corrected here: it
+# used to claim `vipsthumbnail` "gets the equivalent shrink-on-load for free", so
+# the hint merely evened things up. libvips does NOT, at these ratios. Verified
+# with `vips --vips-info`: a 2268x4032 -> 1125x2000 resize is shrink 2.016 and
+# libvips reports `loading with factor 1 pre-shrink`, decoding the FULL 9.14MP.
+# It only pre-shrinks at shrink >= ~2.83 (measured: 2.00 -> factor 1, 2.83 ->
+# factor 2, 5.67 -> factor 4). So GM decodes ~2.29MP here and vips decodes
+# 9.14MP - 4x more. That asymmetry is real and it is production's, not this
+# script's, but do not describe it as "both engines get the same shortcut".
+#
+# THE HINT IS NOT FREE - IT CHANGES THE PIXELS. The 1/2 IDCT is a low-pass
+# prefilter: it discards high-frequency DCT coefficients before Lanczos ever
+# runs. Measured on baseline.jpg at 1125x2000, high-frequency energy (std-dev of
+# a Laplacian) drops from 22.320 to 19.832, and the WebP output shrinks 11.3%
+# (342,256 -> 307,944 bytes) purely because a softer image compresses better.
+# Forcing the hint to full source resolution (`-size 2268x4032`, DCT 1/1)
+# reproduces the no-hint output BYTE FOR BYTE, which is what pins the cause on
+# the scale factor rather than on the resampler.
+#
+# Confirmed harmless for the PNG case (GM has no equivalent scaled-decode path
+# for PNG, so the hint is a no-op there - byte-identical output verified).
 # ============================================================================
 
 hyperfine \

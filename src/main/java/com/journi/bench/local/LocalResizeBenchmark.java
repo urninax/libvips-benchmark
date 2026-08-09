@@ -391,11 +391,31 @@ public final class LocalResizeBenchmark {
      *   does adaptive filtering, so vips emitted a 28% larger file in a quarter of the time by
      *   skipping work GM was doing. Fixed by passing filter=248 (PNG_ALL_FILTERS); matched, vips
      *   is smaller AND still faster, but by ~1.6x rather than the fictional 4.2x.
-     * - WebP was NOT the encoder. Feeding both encoders the SAME pixels gives 308156 vs 307944
-     *   bytes - 0.07% apart - and GM turned out to be plain libwebp defaults, byte-identical to
-     *   `cwebp -q 85`. The ~11% gap comes from the RESAMPLERS: vips' resize is marginally sharper
-     *   than GM's Lanczos (RMSE 0.73% between the two outputs) and sharper images compress worse.
-     *   That is a real property of the libraries, not a misconfiguration, and not "fixable".
+     * - WebP was NOT the encoder, and - CORRECTED - it is NOT the resamplers either. This comment
+     *   previously blamed the resamplers ("vips' resize is marginally sharper than GM's Lanczos...
+     *   a real property of the libraries, not a misconfiguration, and not fixable"). That is wrong.
+     *
+     *   The encoders really are identical: each tool's WebP output is md5-IDENTICAL to
+     *   `cwebp -q 85` run on that tool's own pixels, so both are plain libwebp defaults.
+     *
+     *   The resamplers are also effectively identical. Remove ONE flag - GM's `-size` - and the
+     *   two pipelines converge to 342,256 vs 342,598 bytes (0.1% apart), RMSE 0.67/255, and
+     *   high-frequency energy 22.320 vs 22.326 (0.03% apart). That is the same resampler.
+     *
+     *   The entire ~11% gap is GM's `-size <target>` libjpeg DCT-domain scaled decode. At
+     *   1125/2268 libjpeg picks 4/8 and decodes ~1134x2016 instead of 2268x4032; that half-scale
+     *   IDCT is a low-pass prefilter, discarding high-frequency coefficients before Lanczos runs.
+     *   Softer image, 11% smaller file. Forcing the hint to full source resolution
+     *   (`-size 2268x4032`, DCT 1/1) reproduces the no-hint output BYTE FOR BYTE - which is what
+     *   pins the cause on the scale factor rather than on either library's resize quality.
+     *
+     *   So this row IS a genuine, quotable output difference, but the direction of the finding is
+     *   the opposite of "unfixable library quirk": production passes `-size` for every non-keepExif
+     *   downscale (GraphicsMagickClient.resize), so production GM currently ships measurably softer
+     *   images than a libvips port would. Migrating means sharper output and ~11% larger WebP (and
+     *   ~5% larger JPEG) at the same nominal quality setting - a real storage/CDN consideration,
+     *   not a benchmark artifact. Only WebP trips the 10% gate; the same softening is present in
+     *   every row (jpg +4.9%, png -3.9%, webp +11.3%), WebP simply being the most sensitive codec.
      */
     private static void printValidityGates(List<HyperfineExport.CaseResult> all) {
         System.out.println();
@@ -423,8 +443,15 @@ public final class LocalResizeBenchmark {
                     any = true;
                     System.out.printf(Locale.ROOT,
                         "WARNING [%s]: outputs are not equivalent — sizes differ by %.0f%% "
-                        + "(%s=%dKB vs %s=%dKB). Could be encoder settings or just a different "
-                        + "resampler; check before quoting this row as a clean speedup.%n",
+                        + "(%s=%dKB vs %s=%dKB).%n"
+                        + "  For a JPEG source this is usually GM's `-size` DCT scaled decode, which "
+                        + "low-passes the%n"
+                        + "  image before Lanczos runs — GM ships a softer, smaller file at the same "
+                        + "nominal quality.%n"
+                        + "  That is production's real behaviour, not a benchmark artifact (see "
+                        + "printValidityGates' doc),%n"
+                        + "  so treat it as an output-quality difference to accept, not a speedup to "
+                        + "discount.%n",
                         suffix.trim(), delta * 100, gmName, gm / 1024, vipsName, vips / 1024);
                 }
             }
