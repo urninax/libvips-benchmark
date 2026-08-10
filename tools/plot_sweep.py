@@ -273,19 +273,16 @@ def chart_throughput(panels, meta, out):
         ax.set_xticklabels(labels, fontsize=8.5, color=INK_SECONDARY)
         _style_axes(ax, "throughput (jobs/sec)")
         blurb = PROFILE_BLURB.get(key[1], "")
-        ax.set_title(f"{key[0]} — {key[1]}" + (f"  ({blurb})" if blurb else ""),
+        ax.set_title(f"{key[0]} - {key[1]}" + (f"  ({blurb})" if blurb else ""),
                      fontsize=10, fontweight="bold", color=INK, pad=8)
     for j in range(len(keys), nrows * ncols):
         axes[j // ncols][j % ncols].axis("off")
 
     rect = _frame(fig, fig_w, fig_h, "Throughput per variant",
-                  _run_line(meta) + "   ·   multiplier under each vips bar is speedup vs that panel's baseline",
+                  _run_line(meta),
                   [("GM / IM (forked per job)", COLOR_BASELINE),
-                   ("vips — buffered fetch (b0, b1)", COLOR_BUFFERED),
-                   ("vips — streamed fetch (b2, b3)", COLOR_STREAMED)],
-                  "b0=buff/buff  b1=buff/str  b2=str/buff  b3=str/str (fetch/put). b0/b1 and b2/b3 share a colour "
-                  "because the PUT axis is degenerate at these output sizes — a streamed put never reaches S3's 5MiB "
-                  "multipart threshold, so it buffers and PutObjects anyway.")
+                   ("vips - buffered fetch (b0, b1)", COLOR_BUFFERED),
+                   ("vips - streamed fetch (b2, b3)", COLOR_STREAMED)]
     fig.tight_layout(rect=rect)
     fig.savefig(out, dpi=200)
     plt.close(fig)
@@ -333,7 +330,7 @@ def chart_latency(panels, meta, out):
         lo = min(r["p50_ms"] for r in rows)
         hi = max(r["p99_ms"] for r in rows)
         ax.set_ylim(lo * 0.72, hi * 1.5)
-        ax.set_title(f"{key[0]} — {key[1]}", fontsize=10, fontweight="bold", color=INK, pad=8)
+        ax.set_title(f"{key[0]} - {key[1]}", fontsize=10, fontweight="bold", color=INK, pad=8)
     for j in range(len(keys), nrows * ncols):
         axes[j // ncols][j % ncols].axis("off")
 
@@ -393,13 +390,13 @@ def chart_streaming(panels, meta, out):
 
     single = len(profiles) < 2
     rect = _frame(fig, fig_w, fig_h, "Does streaming the S3 fetch actually help?",
-                  _run_line(meta) + "   ·   mean of (b2 vs b0) and (b3 vs b1) — isolates the fetch axis"
+                  _run_line(meta) + "   ·   mean of (b2 vs b0) and (b3 vs b1) - isolates the fetch axis"
                   + ("   ·   operation: " + next(iter(series)) if len(series) == 1 else ""),
                   None,
-                  ("ONE PROFILE ONLY — this chart answers 'how much' but not 'does it grow with latency'. "
+                  ("ONE PROFILE ONLY this chart answers 'how much' but not 'does it grow with latency'. "
                    "Re-run with PROFILES=\"s3fast s3real s3cross\" for the trend."
                    if single else
-                   "Streaming can only ever hide min(fetch, compute), so the gain should grow as the link slows — "
+                   "Streaming can only ever hide min(fetch, compute), so the gain should grow as the link slows "
                    "until fetch dominates compute entirely. az/region/degraded are 10/2/0.4 Mbit/s links, "
                    "20-70x slower than real S3, and will overstate it."))
     fig.tight_layout(rect=rect)
@@ -431,7 +428,7 @@ def chart_mechanism(panels, meta, out):
         ax.set_xticks(x); ax.set_xticklabels([r["variant"] for r in rows], fontsize=8.5, color=INK_SECONDARY)
         _style_axes(ax, "CPU utilisation (%)")
         ax.set_ylim(0, 108)
-        ax.set_title(f"{key[0]} — {key[1]}", fontsize=10, fontweight="bold", color=INK, pad=8)
+        ax.set_title(f"{key[0]} - {key[1]}", fontsize=10, fontweight="bold", color=INK, pad=8)
 
         ax = axes[1][ci]
         _label_bars(ax, ax.bar(x, [r["overlap"] for r in rows], 0.62, color=colors), "{:.2f}")
@@ -446,7 +443,7 @@ def chart_mechanism(panels, meta, out):
                    ("vips streamed fetch", COLOR_STREAMED)],
                   "Buffered fetch parks a worker while bytes arrive, so cores idle and cpu% drops; streamed fetch "
                   "fills that gap with decode work. An overlap of ~1.00 on a streamed row means the fetch finished "
-                  "before compute started — not that streaming failed.")
+                  "before compute started, not that streaming failed.")
     fig.tight_layout(rect=rect)
     fig.savefig(out, dpi=200)
     plt.close(fig)
@@ -467,7 +464,7 @@ def collect(paths):
     for p in paths:
         meta, sections = parse_summary(p)
         if not sections:
-            print(f"skipped {p} — no result tables found (crashed run, or only progress output?)",
+            print(f"skipped {p} - no result tables found (crashed run, or only progress output?)",
                   file=sys.stderr)
             continue
         metas.append(meta)
@@ -494,7 +491,7 @@ def main():
     else:
         sys.exit(f"not found: {t}")
     if not paths:
-        sys.exit(f"no summary-*.txt in {t} — run ./run-sweep.sh first "
+        sys.exit(f"no summary-*.txt in {t} - run ./run-sweep.sh first "
                  f"(and check results/ is writable; a `tee: Permission denied` loses the whole log)")
 
     panels, meta = collect(paths)
@@ -519,9 +516,9 @@ def main():
         if w:
             print(f"wrote {w}")
     if len(profiles) < 2:
-        print('note: only one latency profile present — the streaming chart shows magnitude but not '
+        print('note: only one latency profile present - the streaming chart shows magnitude but not '
               'the latency TREND. Re-run with PROFILES="s3fast s3real s3cross" ./run-sweep.sh')
-    print("note: no memory chart by design — see this script's docstring.")
+    print("note: no memory chart by design - see this script's docstring.")
 
 
 if __name__ == "__main__":
