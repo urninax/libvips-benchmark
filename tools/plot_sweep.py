@@ -336,11 +336,9 @@ def chart_latency(panels, meta, out):
         axes[j // ncols][j % ncols].axis("off")
 
     rect = _frame(fig, fig_w, fig_h, "Latency spread: p50 to p99",
-                  _run_line(meta) + "   ·   hollow marker = p50, faint = p95, solid = p99",
+                  _run_line(meta),
                   [("GM / IM", COLOR_BASELINE), ("vips buffered fetch", COLOR_BUFFERED),
-                   ("vips streamed fetch", COLOR_STREAMED)],
-                  "Log axis, so read POSITION not bar length. A short line means a tight distribution "
-                  "(predictable per-job latency); a long one means a heavy tail.")
+                   ("vips streamed fetch", COLOR_STREAMED)],None)
     fig.tight_layout(rect=rect)
     fig.savefig(out, dpi=200)
     plt.close(fig)
@@ -391,15 +389,9 @@ def chart_streaming(panels, meta, out):
 
     single = len(profiles) < 2
     rect = _frame(fig, fig_w, fig_h, "Does streaming the S3 fetch actually help?",
-                  _run_line(meta) + "   ·   mean of (b2 vs b0) and (b3 vs b1) - isolates the fetch axis"
+                  _run_line(meta)
                   + ("   ·   operation: " + next(iter(series)) if len(series) == 1 else ""),
-                  None,
-                  ("ONE PROFILE ONLY this chart answers 'how much' but not 'does it grow with latency'. "
-                   "Re-run with PROFILES=\"s3fast s3real s3cross\" for the trend."
-                   if single else
-                   "Streaming can only ever hide min(fetch, compute), so the gain should grow as the link slows "
-                   "until fetch dominates compute entirely. az/region/degraded are 10/2/0.4 Mbit/s links, "
-                   "20-70x slower than real S3, and will overstate it."))
+                  None, None)
     fig.tight_layout(rect=rect)
     fig.savefig(out, dpi=200)
     plt.close(fig)
@@ -439,12 +431,9 @@ def chart_mechanism(panels, meta, out):
         ax.set_ylim(0, max(1.15, max(r["overlap"] for r in rows) * 1.18))
 
     rect = _frame(fig, fig_w, fig_h, "Why streaming wins when it wins",
-                  _run_line(meta) + "   ·   top: CPU utilisation   ·   bottom: I/O–compute overlap",
+                  _run_line(meta),
                   [("GM / IM", COLOR_BASELINE), ("vips buffered fetch", COLOR_BUFFERED),
-                   ("vips streamed fetch", COLOR_STREAMED)],
-                  "Buffered fetch parks a worker while bytes arrive, so cores idle and cpu% drops; streamed fetch "
-                  "fills that gap with decode work. An overlap of ~1.00 on a streamed row means the fetch finished "
-                  "before compute started, not that streaming failed.")
+                   ("vips streamed fetch", COLOR_STREAMED)],None)
     fig.tight_layout(rect=rect)
     fig.savefig(out, dpi=200)
     plt.close(fig)
