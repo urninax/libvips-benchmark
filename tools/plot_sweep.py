@@ -282,7 +282,8 @@ def chart_throughput(panels, meta, out):
                   _run_line(meta),
                   [("GM / IM (forked per job)", COLOR_BASELINE),
                    ("vips - buffered fetch (b0, b1)", COLOR_BUFFERED),
-                   ("vips - streamed fetch (b2, b3)", COLOR_STREAMED)]
+                   ("vips - streamed fetch (b2, b3)", COLOR_STREAMED)],
+                  None)
     fig.tight_layout(rect=rect)
     fig.savefig(out, dpi=200)
     plt.close(fig)
