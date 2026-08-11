@@ -383,9 +383,7 @@ def chart_latency(panels, meta, out, op):
                   _run_line(meta),
                   [("GM / IM", COLOR_BASELINE), ("vips buffered fetch", COLOR_BUFFERED),
                    ("vips streamed fetch", COLOR_STREAMED)],
-                  "p95: 95% of jobs finish within this time - the figure a real SLA cares "
-                  "about, without one worst-case job (max) dominating the chart the way p99 "
-                  "can at only 5 measured reps.")
+                  None)
     fig.tight_layout(rect=rect)
     fig.savefig(out, dpi=200)
     plt.close(fig)
@@ -494,9 +492,7 @@ def chart_mechanism(panels, meta, out, op):
                   _run_line(meta) + "   ·   top: CPU utilisation   ·   bottom: I/O–compute overlap",
                   [("GM / IM", COLOR_BASELINE), ("vips buffered fetch", COLOR_BUFFERED),
                    ("vips streamed fetch", COLOR_STREAMED)],
-                  "Buffered fetch parks a worker while bytes arrive, so cores idle and cpu% drops; streamed fetch "
-                  "fills that gap with decode work. An overlap of ~1.00 on a streamed row means the fetch finished "
-                  "before compute started, not that streaming failed.")
+                  None)
     fig.tight_layout(rect=rect)
     fig.savefig(out, dpi=200)
     plt.close(fig)
