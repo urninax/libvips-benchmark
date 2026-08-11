@@ -26,8 +26,13 @@ Charts emitted (each only when the data supports it):
   sweep_throughput.png           jobs/sec per variant - columns are OPERATIONS
                                   (standard resize first, bleed resize second),
                                   rows are S3 profiles
-  sweep_latency.png              p95 per variant, as bars - the tail figure an
-                                  SLA cares about
+  sweep_latency_standard.png     p95 per variant, as bars, for STANDARD RESIZE -
+  sweep_latency_bleed.png        and the same for BLEED RESIZE. Split in two
+                                  because the two operations' absolute latencies
+                                  are on different scales (bleed's baseline runs
+                                  into the seconds, standard's into the hundreds
+                                  of ms) - mixing them shrinks the smaller one's
+                                  bars to near-invisible next to the larger one's
   sweep_streaming.png            the sweep's actual question: how much does
                                   streamed FETCH buy over buffered, and does it
                                   grow with network latency?
@@ -325,8 +330,15 @@ def chart_throughput(panels, meta, out):
     return out
 
 
-def chart_latency(panels, meta, out):
-    """p95 per variant, as BARS.
+def chart_latency(panels, meta, out, op):
+    """p95 per variant, as BARS, for ONE operation, one panel per S3 profile.
+
+    Split by operation for the same reason chart_mechanism is: bleed and standard
+    resize have different overlap mechanics and different absolute latencies
+    (bleed's baseline p95 runs into the SECONDS, standard's into the hundreds of
+    ms), so mixing them in one grid means the smaller operation's bars are barely
+    visible next to the larger one's. Returns None if `op` has no data in this
+    run, so main() can skip it cleanly.
 
     p95, not p50 or p99: p50 hides the tail an SLA actually has to account for,
     and p99 on a 5-measured-rep queue-drain is one job away from being the single
@@ -337,7 +349,9 @@ def chart_latency(panels, meta, out):
     a single p95 value per variant is an ordinary magnitude bar like any other
     chart here, log axis included.
     """
-    keys = sorted(panels, key=lambda k: (op_key(k[0]), profile_key(k[1])))
+    keys = sorted((k for k in panels if k[0] == op), key=lambda k: profile_key(k[1]))
+    if not keys:
+        return None
     nrows, ncols = _grid_shape(len(keys))
     fig_h = 4.3 * nrows + 1.5
     fig_w = 6.6 * ncols
@@ -360,12 +374,12 @@ def chart_latency(panels, meta, out):
         ax.set_xticklabels(labels, fontsize=8.5, color=INK_SECONDARY)
         _style_axes(ax, "p95 latency (ms)")
         blurb = PROFILE_BLURB.get(key[1], "")
-        ax.set_title(f"{op_label(key[0])} - {key[1]}" + (f"  ({blurb})" if blurb else ""),
+        ax.set_title(key[1] + (f"  ({blurb})" if blurb else ""),
                      fontsize=10, fontweight="bold", color=INK, pad=8)
     for j in range(len(keys), nrows * ncols):
         axes[j // ncols][j % ncols].axis("off")
 
-    rect = _frame(fig, fig_w, fig_h, "P95 latency per variant",
+    rect = _frame(fig, fig_w, fig_h, f"P95 latency per variant — {op_label(op)}",
                   _run_line(meta),
                   [("GM / IM", COLOR_BASELINE), ("vips buffered fetch", COLOR_BUFFERED),
                    ("vips streamed fetch", COLOR_STREAMED)],
@@ -547,7 +561,8 @@ def main():
 
     written = [
         chart_throughput(panels, meta, out_dir / "sweep_throughput.png"),
-        chart_latency(panels, meta, out_dir / "sweep_latency.png"),
+        chart_latency(panels, meta, out_dir / "sweep_latency_standard.png", "standard"),
+        chart_latency(panels, meta, out_dir / "sweep_latency_bleed.png", "bleed"),
         chart_streaming(panels, meta, out_dir / "sweep_streaming.png"),
         chart_mechanism(panels, meta, out_dir / "sweep_mechanism_standard.png", "standard"),
         chart_mechanism(panels, meta, out_dir / "sweep_mechanism_bleed.png", "bleed"),
