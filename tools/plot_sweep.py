@@ -23,11 +23,19 @@ benchmarks already have (LocalMeasure.printMemoryCoverage), none of it is charta
 without misleading someone. Time, throughput, CPU and overlap are all sound.
 
 Charts emitted (each only when the data supports it):
-  sweep_throughput.png    jobs/sec per variant, one panel per (operation, profile)
-  sweep_latency.png       p50/p95/p99 per variant - tail behaviour, log scale
-  sweep_streaming.png     the sweep's actual question: how much does streamed FETCH
-                          buy over buffered, and does it grow with network latency?
-  sweep_mechanism.png     cpu% and overlap ratio - WHY streaming wins when it wins
+  sweep_throughput.png           jobs/sec per variant - columns are OPERATIONS
+                                  (standard resize first, bleed resize second),
+                                  rows are S3 profiles
+  sweep_latency.png              p95 per variant, as bars - the tail figure an
+                                  SLA cares about
+  sweep_streaming.png            the sweep's actual question: how much does
+                                  streamed FETCH buy over buffered, and does it
+                                  grow with network latency?
+  sweep_mechanism_standard.png   cpu% and overlap ratio for STANDARD RESIZE only -
+  sweep_mechanism_bleed.png      and the same for BLEED RESIZE - split in two
+                                  because "why streaming wins" has a different
+                                  answer per operation (see VipsStreamingVariant's
+                                  own doc) and mixing them in one grid buried that
 
 Usage:
   ./tools/plot_sweep.py results
@@ -169,6 +177,22 @@ def profile_key(p):
     return (PROFILE_ORDER.index(p) if p in PROFILE_ORDER else len(PROFILE_ORDER), p)
 
 
+# Standard-first: alphabetical order puts "bleed" before "standard", which is
+# backwards from how these are normally discussed (standard is the common case,
+# bleed is the special one) and was silently putting bleed in every chart's
+# first column/row. Anything not listed sorts last, alphabetically.
+OP_ORDER = ["standard", "bleed"]
+OP_LABEL = {"standard": "Standard resize", "bleed": "Bleed resize"}
+
+
+def op_key(op):
+    return (OP_ORDER.index(op) if op in OP_ORDER else len(OP_ORDER), op)
+
+
+def op_label(op):
+    return OP_LABEL.get(op, op.title())
+
+
 COLOR_OF = {"baseline": COLOR_BASELINE, "buffered": COLOR_BUFFERED, "streamed": COLOR_STREAMED}
 
 
@@ -250,33 +274,44 @@ def _grid_shape(n):
 # ---- charts --------------------------------------------------------------
 
 def chart_throughput(panels, meta, out):
-    """Jobs/sec per variant, one panel per (operation, profile)."""
-    keys = sorted(panels, key=lambda k: (k[0], profile_key(k[1])))
-    nrows, ncols = _grid_shape(len(keys))
+    """Jobs/sec per variant. Grid is COLUMN = operation, ROW = S3 profile - not a
+    flat sequential fill - so standard resize always occupies the left column and
+    bleed resize the right, regardless of how many profiles are present. A flat
+    fill (wrap every ncols items) would interleave the two operations across rows
+    the moment profile count doesn't divide evenly by column count - which it
+    never does here (2 columns, 1-3 profiles).
+    """
+    ops = [o for o in OP_ORDER if o in {k[0] for k in panels}]
+    ops += sorted({k[0] for k in panels} - set(ops))  # anything unexpected, appended, not lost
+    profiles = sorted({k[1] for k in panels}, key=profile_key)
+    ncols, nrows = len(ops), len(profiles)
     fig_h = 4.3 * nrows + 1.5
     fig_w = 6.6 * ncols
     fig, axes = plt.subplots(nrows, ncols, figsize=(fig_w, fig_h),
                              squeeze=False, dpi=200)
-    for idx, key in enumerate(keys):
-        ax = axes[idx // ncols][idx % ncols]
-        rows = sorted(panels[key], key=sort_key)
-        x = np.arange(len(rows))
-        rects = ax.bar(x, [r["thru_s"] for r in rows], 0.62,
-                       color=[COLOR_OF[r["engine"]] for r in rows])
-        _label_bars(ax, rects, "{:.1f}")
-        base = next((r["thru_s"] for r in rows if r["engine"] == "baseline"), None)
-        labels = []
-        for r in rows:
-            speedup = f"\n{r['thru_s']/base:.1f}x" if base and r["engine"] != "baseline" else ""
-            labels.append(f"{r['variant']}{speedup}")
-        ax.set_xticks(x)
-        ax.set_xticklabels(labels, fontsize=8.5, color=INK_SECONDARY)
-        _style_axes(ax, "throughput (jobs/sec)")
-        blurb = PROFILE_BLURB.get(key[1], "")
-        ax.set_title(f"{key[0]} - {key[1]}" + (f"  ({blurb})" if blurb else ""),
-                     fontsize=10, fontweight="bold", color=INK, pad=8)
-    for j in range(len(keys), nrows * ncols):
-        axes[j // ncols][j % ncols].axis("off")
+    for ri, prof in enumerate(profiles):
+        for ci, op in enumerate(ops):
+            ax = axes[ri][ci]
+            rows = panels.get((op, prof))
+            if not rows:
+                ax.axis("off")
+                continue
+            rows = sorted(rows, key=sort_key)
+            x = np.arange(len(rows))
+            rects = ax.bar(x, [r["thru_s"] for r in rows], 0.62,
+                           color=[COLOR_OF[r["engine"]] for r in rows])
+            _label_bars(ax, rects, "{:.1f}")
+            base = next((r["thru_s"] for r in rows if r["engine"] == "baseline"), None)
+            labels = []
+            for r in rows:
+                speedup = f"\n{r['thru_s']/base:.1f}x" if base and r["engine"] != "baseline" else ""
+                labels.append(f"{r['variant']}{speedup}")
+            ax.set_xticks(x)
+            ax.set_xticklabels(labels, fontsize=8.5, color=INK_SECONDARY)
+            _style_axes(ax, "throughput (jobs/sec)")
+            blurb = PROFILE_BLURB.get(prof, "")
+            ax.set_title(f"{op_label(op)} - {prof}" + (f"  ({blurb})" if blurb else ""),
+                         fontsize=10, fontweight="bold", color=INK, pad=8)
 
     rect = _frame(fig, fig_w, fig_h, "Throughput per variant",
                   _run_line(meta),
@@ -291,16 +326,18 @@ def chart_throughput(panels, meta, out):
 
 
 def chart_latency(panels, meta, out):
-    """p50 -> p99 as a RANGE PLOT, not bars.
+    """p95 per variant, as BARS.
 
-    Deliberately not a bar chart: a baseline that spans 10x within one panel needs a
-    log axis, and a bar on a log axis is a lie - bar length encodes magnitude measured
-    from zero, and a log axis has no zero, so matplotlib clips the bar at whatever the
-    axis floor happens to be and the lengths stop meaning anything. A range plot
-    encodes value by POSITION, which is exactly what a log axis supports, and it shows
-    the spread (how far p99 sits above p50) far better than three bars ever did.
+    p95, not p50 or p99: p50 hides the tail an SLA actually has to account for,
+    and p99 on a 5-measured-rep queue-drain is one job away from being the single
+    slowest sample in the whole batch - noisy at this sample count. p95 is the
+    standard tail-latency figure and stable enough here to bar-chart directly, so
+    the earlier range-plot (p50->p99 as a line, needed because a bar chart cannot
+    honestly encode a RANGE on a log axis - see git history) is no longer needed:
+    a single p95 value per variant is an ordinary magnitude bar like any other
+    chart here, log axis included.
     """
-    keys = sorted(panels, key=lambda k: (k[0], profile_key(k[1])))
+    keys = sorted(panels, key=lambda k: (op_key(k[0]), profile_key(k[1])))
     nrows, ncols = _grid_shape(len(keys))
     fig_h = 4.3 * nrows + 1.5
     fig_w = 6.6 * ncols
@@ -309,36 +346,32 @@ def chart_latency(panels, meta, out):
     for idx, key in enumerate(keys):
         ax = axes[idx // ncols][idx % ncols]
         rows = sorted(panels[key], key=sort_key)
-        for i, r in enumerate(rows):
-            c = COLOR_OF[r["engine"]]
-            ax.plot([i, i], [r["p50_ms"], r["p99_ms"]], color=c, linewidth=2,
-                    solid_capstyle="round", zorder=2)
-            # p50 hollow, p95 mid, p99 solid - a filled ring on each so overlapping
-            # markers stay separable against the line and each other.
-            ax.plot(i, r["p50_ms"], "o", ms=7, mfc="white", mec=c, mew=2, zorder=3)
-            ax.plot(i, r["p95_ms"], "o", ms=6, color=c, alpha=0.55, zorder=3)
-            ax.plot(i, r["p99_ms"], "o", ms=8.5, color=c, mec="white", mew=1.2, zorder=4)
-            ax.annotate(f"{r['p99_ms']:.0f}", (i, r["p99_ms"]), xytext=(0, 9),
-                        textcoords="offset points", ha="center", fontsize=7.6,
-                        fontweight="bold", color=INK_SECONDARY)
-            ax.annotate(f"{r['p50_ms']:.0f}", (i, r["p50_ms"]), xytext=(0, -15),
-                        textcoords="offset points", ha="center", fontsize=7.2,
-                        color=INK_MUTED)
-        ax.set_xlim(-0.6, len(rows) - 0.4)
-        ax.set_xticks(range(len(rows)))
-        ax.set_xticklabels([r["variant"] for r in rows], fontsize=8.5, color=INK_SECONDARY)
-        _style_axes(ax, "per-job latency (ms, log)", log=True)
-        lo = min(r["p50_ms"] for r in rows)
-        hi = max(r["p99_ms"] for r in rows)
-        ax.set_ylim(lo * 0.72, hi * 1.5)
-        ax.set_title(f"{key[0]} - {key[1]}", fontsize=10, fontweight="bold", color=INK, pad=8)
+        x = np.arange(len(rows))
+        rects = ax.bar(x, [r["p95_ms"] for r in rows], 0.62,
+                       color=[COLOR_OF[r["engine"]] for r in rows])
+        _label_bars(ax, rects, "{:.0f}")
+        base = next((r["p95_ms"] for r in rows if r["engine"] == "baseline"), None)
+        labels = []
+        for r in rows:
+            factor = (f"\n{base / r['p95_ms']:.1f}x"
+                      if base and r["engine"] != "baseline" and r["p95_ms"] > 0 else "")
+            labels.append(f"{r['variant']}{factor}")
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, fontsize=8.5, color=INK_SECONDARY)
+        _style_axes(ax, "p95 latency (ms)")
+        blurb = PROFILE_BLURB.get(key[1], "")
+        ax.set_title(f"{op_label(key[0])} - {key[1]}" + (f"  ({blurb})" if blurb else ""),
+                     fontsize=10, fontweight="bold", color=INK, pad=8)
     for j in range(len(keys), nrows * ncols):
         axes[j // ncols][j % ncols].axis("off")
 
-    rect = _frame(fig, fig_w, fig_h, "Latency spread: p50 to p99",
+    rect = _frame(fig, fig_w, fig_h, "P95 latency per variant",
                   _run_line(meta),
                   [("GM / IM", COLOR_BASELINE), ("vips buffered fetch", COLOR_BUFFERED),
-                   ("vips streamed fetch", COLOR_STREAMED)],None)
+                   ("vips streamed fetch", COLOR_STREAMED)],
+                  "p95: 95% of jobs finish within this time - the figure a real SLA cares "
+                  "about, without one worst-case job (max) dominating the chart the way p99 "
+                  "can at only 5 measured reps.")
     fig.tight_layout(rect=rect)
     fig.savefig(out, dpi=200)
     plt.close(fig)
@@ -377,7 +410,7 @@ def chart_streaming(panels, meta, out):
         vals = [float(np.mean(by_prof.get(p, [np.nan]))) for p in profiles]
         off = (si - (n - 1) / 2) * w
         rects = ax.bar(xs + off, vals, w * 0.9,
-                       color=COLOR_STREAMED if si == 0 else COLOR_BUFFERED, label=op)
+                       color=COLOR_STREAMED if si == 0 else COLOR_BUFFERED, label=op_label(op))
         _label_bars(ax, rects, "{:+.0f}%")
     ax.axhline(0, color="#c3c2b7", linewidth=1)
     ax.set_xticks(xs)
@@ -390,7 +423,7 @@ def chart_streaming(panels, meta, out):
     single = len(profiles) < 2
     rect = _frame(fig, fig_w, fig_h, "Does streaming the S3 fetch actually help?",
                   _run_line(meta)
-                  + ("   ·   operation: " + next(iter(series)) if len(series) == 1 else ""),
+                  + ("   ·   operation: " + op_label(next(iter(series))) if len(series) == 1 else ""),
                   None, None)
     fig.tight_layout(rect=rect)
     fig.savefig(out, dpi=200)
@@ -398,15 +431,26 @@ def chart_streaming(panels, meta, out):
     return out
 
 
-def chart_mechanism(panels, meta, out):
-    """cpu% and overlap - the WHY behind the throughput numbers.
+def chart_mechanism(panels, meta, out, op):
+    """cpu% and overlap for ONE operation, one column per S3 profile - the WHY
+    behind that operation's throughput numbers.
+
+    Split by operation (this used to be one grid mixing both) because "why
+    streaming wins" doesn't have one answer across both: bleed and standard
+    resize have different overlap mechanics entirely (see VipsStreamingVariant's
+    own doc on why bleed's streamed fetch behaves differently from standard's),
+    and mixing them in one grid buried that distinction instead of showing it.
+    Returns None if `op` has no data in this run, so main() can skip it cleanly.
 
     Buffered fetch parks a worker doing nothing while bytes arrive, so cores sit idle
     and cpu% is lower. Streamed fetch fills that gap with decode work. overlap =
     (fetch+process+upload)/total, so >1.0 means I/O genuinely ran concurrently with
-    compute. Two separate panels, never a dual axis - they share no unit.
+    compute. Two separate panel ROWS (cpu%, overlap), never a dual axis - they share
+    no unit.
     """
-    keys = sorted(panels, key=lambda k: (k[0], profile_key(k[1])))
+    keys = sorted((k for k in panels if k[0] == op), key=lambda k: profile_key(k[1]))
+    if not keys:
+        return None
     fig_h = 8.6
     fig_w = max(9.0, 5.4 * len(keys))
     fig, axes = plt.subplots(2, len(keys), figsize=(fig_w, fig_h),
@@ -415,13 +459,15 @@ def chart_mechanism(panels, meta, out):
         rows = sorted(panels[key], key=sort_key)
         x = np.arange(len(rows))
         colors = [COLOR_OF[r["engine"]] for r in rows]
+        blurb = PROFILE_BLURB.get(key[1], "")
+        panel_title = key[1] + (f"  ({blurb})" if blurb else "")
 
         ax = axes[0][ci]
         _label_bars(ax, ax.bar(x, [r["cpu_pct"] for r in rows], 0.62, color=colors), "{:.0f}%")
         ax.set_xticks(x); ax.set_xticklabels([r["variant"] for r in rows], fontsize=8.5, color=INK_SECONDARY)
         _style_axes(ax, "CPU utilisation (%)")
         ax.set_ylim(0, 108)
-        ax.set_title(f"{key[0]} - {key[1]}", fontsize=10, fontweight="bold", color=INK, pad=8)
+        ax.set_title(panel_title, fontsize=10, fontweight="bold", color=INK, pad=8)
 
         ax = axes[1][ci]
         _label_bars(ax, ax.bar(x, [r["overlap"] for r in rows], 0.62, color=colors), "{:.2f}")
@@ -430,10 +476,13 @@ def chart_mechanism(panels, meta, out):
         _style_axes(ax, "overlap ratio  (>1.0 = I/O overlapped compute)")
         ax.set_ylim(0, max(1.15, max(r["overlap"] for r in rows) * 1.18))
 
-    rect = _frame(fig, fig_w, fig_h, "Why streaming wins when it wins",
-                  _run_line(meta),
+    rect = _frame(fig, fig_w, fig_h, f"Why streaming wins when it wins — {op_label(op)}",
+                  _run_line(meta) + "   ·   top: CPU utilisation   ·   bottom: I/O–compute overlap",
                   [("GM / IM", COLOR_BASELINE), ("vips buffered fetch", COLOR_BUFFERED),
-                   ("vips streamed fetch", COLOR_STREAMED)],None)
+                   ("vips streamed fetch", COLOR_STREAMED)],
+                  "Buffered fetch parks a worker while bytes arrive, so cores idle and cpu% drops; streamed fetch "
+                  "fills that gap with decode work. An overlap of ~1.00 on a streamed row means the fetch finished "
+                  "before compute started, not that streaming failed.")
     fig.tight_layout(rect=rect)
     fig.savefig(out, dpi=200)
     plt.close(fig)
@@ -500,7 +549,8 @@ def main():
         chart_throughput(panels, meta, out_dir / "sweep_throughput.png"),
         chart_latency(panels, meta, out_dir / "sweep_latency.png"),
         chart_streaming(panels, meta, out_dir / "sweep_streaming.png"),
-        chart_mechanism(panels, meta, out_dir / "sweep_mechanism.png"),
+        chart_mechanism(panels, meta, out_dir / "sweep_mechanism_standard.png", "standard"),
+        chart_mechanism(panels, meta, out_dir / "sweep_mechanism_bleed.png", "bleed"),
     ]
     for w in written:
         if w:
